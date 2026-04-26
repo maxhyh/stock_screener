@@ -1,25 +1,26 @@
 {
   "schema_version": 1,
-  "last_run_at": "2026-04-26T22:08:29+08:00",
-  "input_signature": "0fb0f01d4d9530d6",
+  "last_run_at": "2026-04-27T00:07:28+08:00",
+  "input_signature": "a6c89bd9a386c548",
   "active_hashes": [
     "3622f3b98422ad92",
+    "a8edccf342ce5e8d",
     "d9112dec90546429",
+    "1f387fa177c59de7",
     "bc9945e247e7990d",
     "e0d5e375adebd905",
     "1ecc8368d4830de8",
     "2bb4cab621e09813",
     "9d75157e798d069f",
+    "58967edab4e6aa66",
     "74b1f655d7ed1108",
-    "52a0020f68bbb6cc",
-    "e625b71975eb50ea",
-    "e8ae491cc4427ae1",
-    "456382d93b4d760e"
+    "52a0020f68bbb6cc"
   ],
   "new_active_hashes": [
-    "2bb4cab621e09813",
-    "e8ae491cc4427ae1"
+    "1f387fa177c59de7",
+    "58967edab4e6aa66",
+    "a8edccf342ce5e8d"
   ],
-  "learning_entry_count": 8,
-  "error_entry_count": 7
+  "learning_entry_count": 10,
+  "error_entry_count": 9
 }

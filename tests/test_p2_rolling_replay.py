@@ -99,8 +99,10 @@ def test_main_passes_metadata_gate_overrides(monkeypatch, tmp_path: Path):
 
     class _Proc:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
-    def _fake_run(cmd, cwd=None, env=None):
+    def _fake_run(cmd, cwd=None, env=None, **_kwargs):
         calls.append(list(cmd))
         return _Proc()
 
@@ -167,3 +169,88 @@ def test_main_passes_metadata_gate_overrides(monkeypatch, tmp_path: Path):
     assert first[first.index("--max-metadata-staleness-days") + 1] == "999.0"
     assert "--min-industry-coverage-pct" in first
     assert first[first.index("--min-industry-coverage-pct") + 1] == "85.0"
+
+
+def test_main_uses_profile_signal_calendar_when_available(monkeypatch, tmp_path: Path):
+    shared_dir = tmp_path / "daily"
+    profile_root = tmp_path / "daily_profiles"
+    profile_dir = profile_root / "quality_regime_candidate_v8_reserve_pool"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (shared_dir / "daily_20260401.csv").write_text("代码,名称\n000001,平安银行\n", encoding="utf-8-sig")
+    profile_file = profile_dir / "daily_20260402.csv"
+    profile_file.write_text("代码,名称,target_weight\n000002,万科A,0.10\n", encoding="utf-8-sig")
+
+    monkeypatch.setattr(
+        replay,
+        "get_output_dirs",
+        lambda _output_dir: {"daily": shared_dir, "base": shared_dir},
+    )
+    monkeypatch.setattr(replay, "EXEC_DIR", tmp_path / "execution")
+    monkeypatch.setattr(replay, "BACKTEST_DIR", tmp_path / "backtest")
+    mock_p2_script = tmp_path / "quant_p2_paper_trade.py"
+    mock_p2_script.write_text("# mock\n", encoding="utf-8")
+    monkeypatch.setattr(replay, "P2_SCRIPT", mock_p2_script)
+
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, cwd=None, env=None, **_kwargs):
+        calls.append(list(cmd))
+        return _Proc()
+
+    monkeypatch.setattr(replay.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        replay,
+        "_summarize_ledger",
+        lambda _ledger_file: {
+            "executed_days": 1,
+            "nav_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "turnover_mean": 0.0,
+            "exec_block_rate_pct": 0.0,
+            "risk_block_rate_pct": 0.0,
+            "style_hit_rate_pct": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "quant_p2_rolling_replay.py",
+            "--profiles",
+            "quality_regime_candidate_v8_reserve_pool",
+            "--windows",
+            "1",
+            "--style-size-grid",
+            "0.9",
+            "--style-beta-grid",
+            "0.9",
+            "--style-momentum-grid",
+            "1.2",
+            "--style-vol-grid",
+            "1.1",
+            "--style-lb-short-grid",
+            "20",
+            "--style-lb-beta-grid",
+            "60",
+            "--profile-signal-root",
+            str(profile_root),
+            "--write-latest",
+        ],
+    )
+
+    assert replay.main() == 0
+    assert calls
+    first = calls[0]
+    assert "--signal-file" in first
+    assert first[first.index("--signal-file") + 1] == str(profile_file)
+    assert "--date" not in first
+    runs = pd.read_csv(
+        tmp_path / "backtest" / "p2_rolling_replay_runs_latest_quality_regime_candidate_v8_reserve_pool.csv"
+    )
+    assert runs["signal_date_source"].iloc[0] == "profile"

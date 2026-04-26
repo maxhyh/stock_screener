@@ -55,8 +55,10 @@ https://github.com/maxhyh/stock_screener
 - v7 invested-weight 行业集中约 31.86%，NAV-weight 行业集中约 6.21%，行业治理方向是对的。
 - v7 ADV blocked rows 约 105，仍未达到小于 100 的硬目标。
 - 2026 年 3 月底 blocked order 集中爆发，主要来自 `entry_not_tradable / exit_not_tradable`，不是单纯 ADV。
-- 当前不应升档 v7；v8 `quality_regime_candidate_v8_reserve_pool` 已开始修复“容量约束后现金过高”和“不可交易阻塞集中爆发”，方式是扩展候选池、clip 后递补、P2 pretrade 阶段对买入不可交易/ADV/行业阻塞做 reserve 替换。
-- v8 仍是 shadow 档，必须重跑 60/90/120 P2 后才能评价，不允许直接升档。
+- 当前不应升档 v7；v8 `quality_regime_candidate_v8_reserve_pool` 已修复一部分“容量约束后现金过高”问题，方式是扩展候选池、clip 后递补、P2 pretrade 阶段对买入不可交易/ADV/行业阻塞做 reserve 替换。
+- v8 使用 profile 隔离 daily 信号重跑了 60/90/120 P2：NAV 约 `-5.33% / -11.74% / -16.09%`，MDD 约 `-8.10% / -12.78% / -16.79%`，target-weight mean 约 `34.3% / 36.1% / 37.2%`。
+- v8 行业均值约束改善，但 ADV/risk blocked rows 仍很重；shadow diagnosis 约 `1017` ADV blocked rows，3 月底和 4 月初仍有 `entry_not_tradable / exit_not_tradable` 集中爆发。
+- v8 alpha attribution 不支持升档：raw ML top、optimizer、P2 fill 的平均 forward return 均为负。v8 应继续 shadow，不允许直接升档。
 
 请输出：
 A. 总体判断：这个项目更像真实可演进的量化平台，还是复杂回测工程？
@@ -64,7 +66,7 @@ B. 最严重的 5 个策略/回测/执行问题，按优先级排序。
 C. 对信号层、过滤层、排名层、组合层、执行层、治理层分别评价。
 D. 判断当前收益最可能来自真实 alpha、行业/小盘暴露、低容量偏差、执行口径残差，还是混合来源。
 E. 明确指出当前最可能的伪 alpha 来源。
-F. 审查 v7 方向是否正确，以及 v8 reserve pool 是否真正解决现金过高和阻塞递补问题。
+F. 审查 v7 方向是否正确，以及 v8 reserve pool 为什么只改善仓位却没有改善执行后收益。
 G. 检查 promotion gate 是否足以阻止错误升档。
 H. 给出未来 2 周和 1 个月最应该做的具体改造，不要泛泛而谈。
 I. 如果你认为某些模块不可信或有重大偏差，请直接指出，不要迎合。

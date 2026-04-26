@@ -1,6 +1,6 @@
 # Expert Review Brief
 
-> Review snapshot date: 2026-04-26
+> Review snapshot date: 2026-04-27
 > Repository purpose: A-share daily quant research, portfolio construction, paper execution, diagnostics, and promotion governance.
 
 ## 1. What This Project Is
@@ -64,7 +64,22 @@ Latest local P2 and shadow evidence indicates:
 
 These figures are copied into this brief to give external reviewers context without committing the full local `output/` artifact tree.
 
-## 6. Known Open Problems
+## 6. Latest v8 Evidence Summary
+
+Fresh local v8 evidence was generated with profile-isolated daily signals, not shared daily files:
+
+- v8 60/90/120 day P2 NAV: about `-5.33% / -11.74% / -16.09%`.
+- v8 60/90/120 max drawdown: about `-8.10% / -12.78% / -16.79%`.
+- v8 60/90/120 target-weight mean: about `34.3% / 36.1% / 37.2%`.
+- v8 60/90/120 executed days: `47 / 77 / 107`, with `13` failed/no-trade days in each window.
+- v8 shadow diagnosis shows mean invested-weight top industry about `21.70%` and mean NAV-weight top industry about `6.26%`, so average industry concentration is improved.
+- v8 ADV/risk blocked rows remain severe: shadow diagnosis reports about `1017` ADV-blocked rows across 60/90/120.
+- The largest execution breaks remain clustered around `2026-03-30` and `2026-04-07`, with heavy `entry_not_tradable` and `exit_not_tradable` blocks.
+- v8 alpha attribution is not convincing: artifact-based raw ML top mean forward return is about `-0.32%`, optimizer-stage mean forward return about `-1.06%`, and P2-fill mean forward return about `-0.16%`.
+
+Interpretation: v8 is a more honest execution-repair profile because it raises deployed target weight versus v7, but it does not pass NAV/MDD, ADV, or executed-day evidence. It should remain shadow.
+
+## 7. Known Open Problems
 
 The next review should be especially strict on these points:
 
@@ -74,9 +89,10 @@ The next review should be especially strict on these points:
 4. Late-March blocked orders expose an execution break around T+1 tradability, limit-up/limit-down, and suspension behavior.
 5. Industry concentration has improved, but effective deployed capital and post-execution NAV still need proof.
 6. Profile promotion must reject candidates that win only by holding excess cash or benefiting from incomplete execution modeling.
-7. v8 reserve-pool evidence still needs fresh 60/90/120 P2 replay before any promotion discussion.
+7. v8 reserve-pool evidence now shows better target-weight utilization but worse execution-layer NAV and drawdown; it should not be promoted.
+8. Profile-specific daily signal calendars are mandatory for fair replay. Shared daily fallback can contaminate candidate evidence.
 
-## 7. What Expert Review Should Decide
+## 8. What Expert Review Should Decide
 
 The review should answer:
 
@@ -85,4 +101,4 @@ The review should answer:
 - Does the current backtest/paper chain avoid material look-ahead and execution overstatement?
 - Is the portfolio engine mature enough, or should the objective function be made more explicit?
 - Are the promotion gates hard enough for real A-share constraints?
-- Should v8 focus on reserve candidates, redistribution after capacity clips, and tradability-block repair before any alpha tuning?
+- Should v9 focus on capacity-safe reserve generation, blocked-order state machines, and alpha-quality repair before any alpha tuning or risk loosening?

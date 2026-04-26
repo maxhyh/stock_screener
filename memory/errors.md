@@ -4,6 +4,24 @@ Record recurring mistakes and failure modes. Keep this practical: symptom, cause
 
 ## Error Log
 
+### 2026-04-27 | Shared daily fallback contaminates profile replay evidence
+- tags: p2, profile, replay, evidence
+- status: active
+- severity: critical
+- mitigation: When profile-specific daily files exist, use that profile's signal calendar and do not select dates from shared `output/daily`.
+- evidence: A v8 replay started with profile files but fell back to shared files for missing dates; it was stopped and `quant_p2_rolling_replay.py` was changed to prefer profile calendars.
+
+Do not mix shared daily recommendations into candidate replay. It makes target-weight, reserve-pool, and promotion evidence profile-inconsistent.
+
+### 2026-04-27 | Reserve pool can raise exposure while worsening realized losses
+- tags: v8, reserve_pool, alpha, p2
+- status: active
+- severity: high
+- mitigation: Treat target-weight utilization as necessary but not sufficient; require NAV/MDD parity, ADV/tradability block control, and alpha attribution before promotion.
+- evidence: v8 target_weight_sum_mean improved to 34.3%/36.1%/37.2% across 60/90/120 P2, but NAV fell -5.33%/-11.74%/-16.09%.
+
+Solving cash drag can expose weak alpha. Do not interpret higher invested weight as a strategy improvement unless post-execution return quality also improves.
+
 ### 2026-04-26 | Expanding candidate count without primary-topN semantics creates micro-position drift
 - tags: reserve_pool, optimizer, target_weight
 - status: active

@@ -4,6 +4,24 @@ Append durable research, execution, and governance learnings here. Keep entries 
 
 ## Learnings Log
 
+### 2026-04-27 | Profile-specific signal calendars are mandatory for fair replay
+- tags: p2, profile, evidence, replay
+- reusable: yes
+- confidence: high
+- evidence: Initial v8 P2 replay mixed profile-specific v8 files with shared `output/daily` files for dates absent from `output/daily_profiles/quality_regime_candidate_v8_reserve_pool`; replay was stopped and `quant_p2_rolling_replay.py` was changed to use profile calendars when present.
+- action: For profile evidence, rebuild `output/daily_profiles/<profile>/daily_*.csv` first and require rolling replay to select dates from that profile calendar.
+
+Shared daily fallback can silently contaminate candidate replay because old default-profile daily files may not match the tested profile's reserve pool, target weights, or gates.
+
+### 2026-04-27 | v8 improves invested weight but fails execution-alpha validation
+- tags: v8, p2, reserve_pool, alpha, promotion
+- reusable: yes
+- confidence: high
+- evidence: v8 profile-isolated P2 60/90/120 NAV = -5.33%/-11.74%/-16.09%, MDD = -8.10%/-12.78%/-16.79%, target_weight_sum_mean = 34.3%/36.1%/37.2%; alpha attribution shows negative forward return for raw ML top, optimizer, and P2 fill stages.
+- action: Keep v8 shadow; next work should improve capacity-safe reserve quality and blocked-order state handling before loosening risk constraints or promoting.
+
+Reserve pool raised effective target weight compared with v7, but the higher exposure revealed weak execution-layer alpha and severe ADV/tradability blocking.
+
 ### 2026-04-26 | Reserve pool must enter before optimizer and P2 pretrade
 - tags: reserve_pool, p2, capacity, tradability
 - reusable: yes

@@ -32,11 +32,12 @@ OUTPUT_DIR = BASE_DIR / "output"
 EXEC_DIR = OUTPUT_DIR / "execution"
 BACKTEST_DIR = OUTPUT_DIR / "backtest"
 P2_SCRIPT = BASE_DIR / "scripts" / "quant_p2_paper_trade.py"
+LOG_DIR = BASE_DIR / "logs" / "p2_rolling_replay"
 
 
 def _log(msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}")
+    print(f"[{ts}] {msg}", flush=True)
 
 
 def _parse_list_arg(raw: str) -> list[str]:
@@ -103,6 +104,11 @@ def _sanitize_channel(name: str) -> str:
     return s or "paper_replay"
 
 
+def _sanitize_profile_slug(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_]+", "_", str(name or "").strip()).strip("_")
+    return s
+
+
 def _single_profile_slug(profiles: list[str]) -> str:
     if len(profiles) != 1:
         return ""
@@ -119,6 +125,38 @@ def _list_signal_dates() -> list[str]:
         if m:
             dates.append(m.group(1))
     return sorted(set(dates))
+
+
+def _list_profile_signal_dates(profile_signal_root: str | Path, profile: str) -> list[str]:
+    root = Path(profile_signal_root)
+    slug = _sanitize_profile_slug(profile)
+    if not slug:
+        return []
+    profile_dir = root / slug
+    if not profile_dir.exists():
+        return []
+    pat = re.compile(r"daily_(\d{8})\.csv$")
+    dates: list[str] = []
+    for p in profile_dir.glob("daily_*.csv"):
+        m = pat.match(p.name)
+        if m:
+            dates.append(m.group(1))
+    return sorted(set(dates))
+
+
+def _resolve_profile_signal_file(profile_signal_root: str | Path, profile: str, date_str: str) -> Path | None:
+    root = Path(profile_signal_root)
+    slug = _sanitize_profile_slug(profile)
+    if not slug:
+        return None
+    candidates = [
+        root / slug / f"daily_{date_str}.csv",
+        OUTPUT_DIR / "daily_profiles" / slug / f"daily_{date_str}.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 
 def _max_drawdown_pct(nav_series: list[float]) -> float:
@@ -358,6 +396,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--style-lb-short-grid", type=str, default=os.environ.get("MFTS_STYLE_LB_SHORT_GRID", "20"), help="style short lookback 网格")
     p.add_argument("--style-lb-beta-grid", type=str, default=os.environ.get("MFTS_STYLE_LB_BETA_GRID", "60"), help="style beta lookback 网格")
     p.add_argument("--max-grid-combos", type=int, default=0, help="最多执行的 style 组合数（0=全部）")
+    p.add_argument(
+        "--profile-signal-root",
+        type=str,
+        default=os.environ.get("MFTS_PROFILE_SIGNAL_ROOT", str(OUTPUT_DIR / "daily_profiles")),
+        help="profile 隔离 daily 信号根目录；若存在 <root>/<profile>/daily_YYYYMMDD.csv 则优先使用",
+    )
+    p.add_argument("--verbose", action="store_true", help="直接输出每日 P2 子进程日志；默认写入 logs/p2_rolling_replay")
     p.add_argument("--disable-industry-coverage-gate", action="store_true", help="关闭 P2 元数据行业覆盖率/新鲜度门禁")
     p.add_argument(
         "--min-industry-coverage-pct",
@@ -430,9 +475,18 @@ def main() -> int:
     run_rows: list[dict[str, object]] = []
     summary_rows: list[dict[str, object]] = []
 
+    profile_signal_date_counts: dict[str, int] = {}
     for profile in profiles:
+        profile_signal_dates = _list_profile_signal_dates(args.profile_signal_root, profile)
+        profile_signal_date_counts[profile] = int(len(profile_signal_dates))
+        calendar_dates = profile_signal_dates if profile_signal_dates else signal_dates
+        signal_date_source = "profile" if profile_signal_dates else "shared"
+        if profile_signal_dates:
+            _log(f"profile={profile} 使用 profile 专属 signal calendar: days={len(profile_signal_dates)}")
+        else:
+            _log(f"profile={profile} 未找到 profile 专属 signal calendar，回退 shared daily: days={len(signal_dates)}")
         for window in windows:
-            target_dates = signal_dates[-window:] if len(signal_dates) > window else signal_dates[:]
+            target_dates = calendar_dates[-window:] if len(calendar_dates) > window else calendar_dates[:]
             for combo_idx, style_cfg in enumerate(style_grid, start=1):
                 if not target_dates:
                     summary_rows.append(
@@ -447,6 +501,7 @@ def main() -> int:
                             "style_lb_short": int(style_cfg["style_lb_short"]),
                             "style_lb_beta": int(style_cfg["style_lb_beta"]),
                             "signal_days": 0,
+                            "signal_date_source": signal_date_source,
                             "run_success_days": 0,
                             "run_failed_days": 0,
                             "executed_days": 0,
@@ -475,17 +530,17 @@ def main() -> int:
 
                 _log(
                     f"回放 profile={profile}, window={window}, combo={combo_idx}/{len(style_grid)}, "
-                    f"days={len(target_dates)}, range={target_dates[0]}~{target_dates[-1]}, channel={channel}"
+                    f"days={len(target_dates)}, source={signal_date_source}, "
+                    f"range={target_dates[0]}~{target_dates[-1]}, channel={channel}"
                 )
 
                 success_days = 0
                 failed_days = 0
                 for idx, d in enumerate(target_dates):
+                    profile_signal_file = _resolve_profile_signal_file(args.profile_signal_root, profile, str(d))
                     cmd = [
                         sys.executable,
                         str(P2_SCRIPT),
-                        "--date",
-                        str(d),
                         "--broker",
                         str(args.broker),
                         "--channel",
@@ -512,6 +567,10 @@ def main() -> int:
                         str(max(0.0, float(args.max_metadata_staleness_days))),
                         "--strict",
                     ]
+                    if profile_signal_file is not None:
+                        cmd.extend(["--signal-file", str(profile_signal_file)])
+                    else:
+                        cmd.extend(["--date", str(d)])
                     if args.risk_max_industry_weight is not None:
                         cmd.extend(
                             [
@@ -535,10 +594,23 @@ def main() -> int:
                     env = os.environ.copy()
                     env["MFTS_P2_PROFILE"] = str(profile)
                     env["MFTS_ACTIVE_PROFILE"] = str(profile)
-                    proc = subprocess.run(cmd, cwd=str(BASE_DIR), env=env)
+                    child_log_file = ""
+                    if bool(args.verbose):
+                        proc = subprocess.run(cmd, cwd=str(BASE_DIR), env=env)
+                    else:
+                        LOG_DIR.mkdir(parents=True, exist_ok=True)
+                        child_log = LOG_DIR / f"{channel}_{d}.log"
+                        proc = subprocess.run(cmd, cwd=str(BASE_DIR), env=env, text=True, capture_output=True)
+                        child_log.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+                        child_log_file = str(child_log)
                     ok = proc.returncode == 0
                     success_days += int(ok)
                     failed_days += int(not ok)
+                    _log(
+                        f"day profile={profile}, window={window}, date={d}, "
+                        f"ok={int(ok)}, signal={'profile' if profile_signal_file is not None else 'shared'}, "
+                        f"log={child_log_file or 'stdout'}"
+                    )
                     run_rows.append(
                         {
                             "profile": profile,
@@ -552,6 +624,9 @@ def main() -> int:
                             "style_lb_beta": int(style_cfg["style_lb_beta"]),
                             "channel": channel,
                             "signal_date": d,
+                            "signal_date_source": signal_date_source,
+                            "signal_file": str(profile_signal_file or ""),
+                            "child_log_file": child_log_file,
                             "return_code": int(proc.returncode),
                             "ok": int(ok),
                         }
@@ -581,6 +656,7 @@ def main() -> int:
                         "signal_start": target_dates[0],
                         "signal_end": target_dates[-1],
                         "signal_days": int(len(target_dates)),
+                        "signal_date_source": signal_date_source,
                         "run_success_days": int(success_days),
                         "run_failed_days": int(failed_days),
                         "executed_days": int(metrics.get("executed_days", 0)),
@@ -629,6 +705,8 @@ def main() -> int:
         "profiles": profiles,
         "windows": windows,
         "signal_dates": len(signal_dates),
+        "profile_signal_root": str(args.profile_signal_root),
+        "profile_signal_date_counts": profile_signal_date_counts,
         "style_grid_count": int(len(style_grid)),
         "style_grid": style_grid,
         "objective": "ret - 0.60*|mdd| - 0.00002*turnover_mean - 0.12*exec_block - 0.12*risk_block - 0.08*style_hit_rate",

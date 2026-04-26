@@ -15,6 +15,7 @@ import os
 import sys
 import pickle
 import json
+import re
 from datetime import datetime
 import argparse
 from pathlib import Path
@@ -100,6 +101,11 @@ def _resolve_candidate_pool_n(top_n: int, available_n: int, profile_cfg: dict[st
     if max_n > 0:
         pool_n = min(pool_n, max(top_n, max_n))
     return max(1, min(int(pool_n), available_n))
+
+
+def _sanitize_profile_slug(raw: object) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw or "").strip()).strip("_")
+    return s
 
 
 def load_latest_model():
@@ -1093,14 +1099,20 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         result[col] = result[col].round(decimals)
 
     # 7. 保存结果（daily 子目录 + 兼容旧路径双写）
-    dirs = ensure_output_dirs(OUTPUT_DIR)
-    daily_dir = dirs['daily']
     base_dir = Path(OUTPUT_DIR)
+    dirs = ensure_output_dirs(base_dir)
+    output_profile = _sanitize_profile_slug(os.environ.get("MFTS_DAILY_OUTPUT_PROFILE", ""))
     date_str = target_date.strftime('%Y%m%d')
+    if output_profile:
+        daily_dir = base_dir / "daily_profiles" / output_profile
+        risk_dir = base_dir / "risk_profiles" / output_profile
+        legacy_file = daily_dir / f"daily_{date_str}.csv"
+    else:
+        daily_dir = dirs['daily']
+        risk_dir = base_dir / "risk"
+        legacy_file = base_dir / f"daily_{date_str}.csv"
     output_file = daily_dir / f"daily_{date_str}.csv"
-    legacy_file = base_dir / f"daily_{date_str}.csv"
     write_dual_csv(result, output_file, legacy_file, index=False, encoding='utf-8-sig')
-    risk_dir = base_dir / "risk"
     risk_dir.mkdir(parents=True, exist_ok=True)
     risk_file = risk_dir / f"signal_pretrade_gates_{date_str}.csv"
     risk_latest_file = risk_dir / "signal_pretrade_gates_latest.csv"
@@ -1108,6 +1120,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     signal_risk_block_df.to_csv(risk_latest_file, index=False, encoding="utf-8-sig")
     summary_obj = {
         "date": target_date.strftime("%Y-%m-%d"),
+        "output_profile": str(output_profile),
         "market_state": regime.get("state", ""),
         "regime_top_n": int(regime_top_n),
         "ranking_col": str(ranking_col),
@@ -1199,7 +1212,15 @@ def main():
         default=float(os.environ.get("MFTS_MAX_METADATA_STALENESS_DAYS", "3.0")),
         help="元数据允许的最大陈旧天数",
     )
+    parser.add_argument(
+        "--output-profile",
+        type=str,
+        default=os.environ.get("MFTS_DAILY_OUTPUT_PROFILE", ""),
+        help="将 daily/risk 输出写入 profile 隔离目录 output/daily_profiles/<profile>/",
+    )
     args = parser.parse_args()
+    if str(args.output_profile or "").strip():
+        os.environ["MFTS_DAILY_OUTPUT_PROFILE"] = str(args.output_profile).strip()
     profile_cfg = load_default_profile_config()
     
     if not bool(args.disable_industry_coverage_gate):
