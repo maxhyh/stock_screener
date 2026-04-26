@@ -98,7 +98,7 @@
 - 复用 `core/risk/pretrade.py`（与 P2 同一套硬门禁逻辑）
 - 新增环境变量开关：
   - `MFTS_SIGNAL_PRETRADE_GATE`（默认开启）
-  - `MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY`（默认开启，存在下一交易日时按执行日口径预检）
+  - `MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY`（当前默认关闭；开启后仅用于 P2 对齐或事后执行诊断，避免研究路径泄露下一交易日可交易状态）
   - `MFTS_SIGNAL_PRETRADE_STRICT`（默认关闭；开启后不足 TopN 直接失败）
   - `MFTS_SIGNAL_PRETRADE_POOL_N`（默认 `0`，由 `top_n/pool_mult` 动态决定）
 2. `scripts/daily_all.py` Step3(ML) 已自动透传 P2 风控参数：

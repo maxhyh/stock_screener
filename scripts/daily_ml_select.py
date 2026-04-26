@@ -383,12 +383,14 @@ def _apply_signal_pretrade_gate(
     bars_idx = _build_bars_idx(bars_window_df)
     trading_days = sorted(bars_idx.index.get_level_values(0).unique()) if not bars_idx.empty else []
     gate_date = pd.Timestamp(signal_date).normalize()
-    use_next_day = _parse_bool_like(os.environ.get("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", "true"), default=True)
+    use_next_day = _parse_bool_like(os.environ.get("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", "false"), default=False)
     if use_next_day:
         next_day = _resolve_next_trade_day(trading_days, gate_date)
         if next_day is not None:
             gate_date = pd.Timestamp(next_day).normalize()
     info["trade_date"] = gate_date.strftime("%Y-%m-%d")
+    info["research_safe_mode"] = int(not bool(use_next_day))
+    info["pretrade_uses_next_trade_day"] = int(bool(use_next_day))
 
     cfg = _build_signal_pretrade_cfg_from_env(profile_cfg)
     eff_industry_map = industry_map if industry_map is not None else load_industry_map(data_dir)
@@ -675,7 +677,11 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     lookback_days = int(os.environ.get("MFTS_ML_LOOKBACK_DAYS", "450"))
     forward_buffer_days = int(os.environ.get("MFTS_ML_FORWARD_BUFFER_DAYS", "2"))
     pretrade_gate_on = _parse_bool_like(os.environ.get("MFTS_SIGNAL_PRETRADE_GATE", "true"), default=True)
-    if pretrade_gate_on:
+    pretrade_uses_next_day = _parse_bool_like(
+        os.environ.get("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", "false"),
+        default=False,
+    )
+    if pretrade_gate_on and pretrade_uses_next_day:
         pretrade_forward_floor = max(
             0,
             int(os.environ.get("MFTS_SIGNAL_PRETRADE_FORWARD_BUFFER_DAYS", "10")),

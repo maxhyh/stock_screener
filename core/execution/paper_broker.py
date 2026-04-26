@@ -196,16 +196,18 @@ class PaperBroker(BrokerAdapter):
         picks = signal_df.head(max(1, top_n)).copy()
         target_total_pos = min(max(float(target_total_pos), 0.0), 1.0)
         max_single_pos = min(max(float(max_single_pos), 0.0), 1.0)
-        external_weight = (
+        external_weight_raw = (
             pd.to_numeric(picks["target_weight"], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
             if "target_weight" in picks.columns
             else np.array([], dtype=float)
         )
-        if len(external_weight) == len(picks) and float(np.sum(external_weight)) > 0:
-            w = external_weight
+        target_weight_source = "score_weight_fallback"
+        if len(external_weight_raw) == len(picks) and float(np.sum(external_weight_raw)) > 0:
+            w = external_weight_raw.copy()
             if float(np.sum(w)) > target_total_pos + 1e-12 and target_total_pos > 0:
                 w = w * (target_total_pos / float(np.sum(w)))
             w = np.minimum(w, max_single_pos)
+            target_weight_source = "external_target_weight"
         else:
             score = pd.to_numeric(picks["ML评分"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
             w = build_score_weights(score, total_target=target_total_pos, single_cap=max_single_pos)
@@ -213,7 +215,10 @@ class PaperBroker(BrokerAdapter):
                 w = np.zeros(len(picks), dtype=float)
         picks["target_weight"] = w
         if "target_weight_raw" not in picks.columns:
-            picks["target_weight_raw"] = picks["target_weight"]
+            picks["target_weight_raw"] = (
+                external_weight_raw if target_weight_source == "external_target_weight" else picks["target_weight"]
+            )
+        picks["target_weight_source"] = target_weight_source
         if "impact_cost_bps" not in picks.columns:
             picks["impact_cost_bps"] = 0.0
         if "participation_pct" not in picks.columns:
@@ -226,6 +231,7 @@ class PaperBroker(BrokerAdapter):
         target_qty_map: dict[str, int] = {}
         target_weight_map: dict[str, float] = {}
         target_weight_raw_map: dict[str, float] = {}
+        target_weight_source_map: dict[str, str] = {}
         impact_bps_map: dict[str, float] = {}
         participation_map: dict[str, float] = {}
         unfilled_weight_map: dict[str, float] = {}
@@ -248,6 +254,9 @@ class PaperBroker(BrokerAdapter):
             target_qty_map[code] = max(0, qty)
             target_weight_map[code] = float(tgt_w)
             target_weight_raw_map[code] = _safe_float(row.get("target_weight_raw", tgt_w), tgt_w)
+            target_weight_source_map[code] = str(
+                row.get("target_weight_source", target_weight_source) or target_weight_source
+            )
             impact_bps_map[code] = max(0.0, _safe_float(row.get("impact_cost_bps", 0.0), 0.0))
             participation_map[code] = max(0.0, _safe_float(row.get("participation_pct", 0.0), 0.0))
             unfilled_weight_map[code] = max(0.0, _safe_float(row.get("unfilled_target_weight", 0.0), 0.0))
@@ -289,6 +298,7 @@ class PaperBroker(BrokerAdapter):
                         "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                        "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
                         "participation_pct": float(participation_map.get(code, 0.0)),
                         "impact_cost_bps": float(impact_bps_map.get(code, 0.0)),
                         "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
@@ -329,6 +339,7 @@ class PaperBroker(BrokerAdapter):
                     "open_price": open_px,
                     "target_weight": float(target_weight_map.get(code, 0.0)),
                     "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                    "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
                     "participation_pct": float(participation_map.get(code, 0.0)),
                     "impact_cost_bps": float(impact_bps),
                     "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
@@ -379,6 +390,7 @@ class PaperBroker(BrokerAdapter):
                         "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                        "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
                         "participation_pct": float(participation_map.get(code, 0.0)),
                         "impact_cost_bps": float(impact_bps_map.get(code, 0.0)),
                         "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
@@ -413,6 +425,7 @@ class PaperBroker(BrokerAdapter):
                         "open_price": open_px,
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                        "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
                         "participation_pct": float(participation_map.get(code, 0.0)),
                         "impact_cost_bps": float(impact_bps),
                         "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
@@ -455,6 +468,7 @@ class PaperBroker(BrokerAdapter):
                     "open_price": open_px,
                     "target_weight": float(target_weight_map.get(code, 0.0)),
                     "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                    "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
                     "participation_pct": float(participation_map.get(code, 0.0)),
                     "impact_cost_bps": float(impact_bps),
                     "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
@@ -508,6 +522,8 @@ class PaperBroker(BrokerAdapter):
             "rejected_orders": int((orders_df["status"] == "rejected").sum()) if not orders_df.empty else 0,
             "turnover": turnover,
             "target_weight_sum": float(np.sum(list(target_weight_map.values()))) if target_weight_map else 0.0,
+            "target_weight_raw_sum": float(np.sum(list(target_weight_raw_map.values()))) if target_weight_raw_map else 0.0,
+            "target_weight_source": str(target_weight_source),
             "unfilled_target_weight": float(np.sum(list(unfilled_weight_map.values()))) if unfilled_weight_map else 0.0,
             "impact_cost_bps_mean": float(np.mean(list(impact_bps_map.values()))) if impact_bps_map else 0.0,
             "max_participation_pct": float(np.max(list(participation_map.values()))) if participation_map else 0.0,

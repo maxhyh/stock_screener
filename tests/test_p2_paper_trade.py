@@ -8,6 +8,7 @@ import pytest
 
 from core.execution import create_broker
 from core.execution.paper_broker import PaperBroker, PaperBrokerStateError
+from scripts.quant_p2_paper_trade import _rebalance as _legacy_script_rebalance
 
 
 def _bars_idx_for_date(trade_date: str, locked_up: bool = False) -> pd.DataFrame:
@@ -121,8 +122,41 @@ def test_rebalance_uses_external_target_weight_when_present(tmp_path):
     buys = result.orders_df[result.orders_df["side"] == "BUY"].set_index("code")
     assert float(buys.loc["000001", "target_weight"]) == 0.10
     assert float(buys.loc["000002", "target_weight"]) == 0.50
+    assert str(buys.loc["000001", "target_weight_source"]) == "external_target_weight"
+    assert str(buys.loc["000002", "target_weight_source"]) == "external_target_weight"
     assert int(buys.loc["000002", "requested_qty"]) > int(buys.loc["000001", "requested_qty"])
     assert result.ledger_row["target_weight_sum"] == pytest.approx(0.60)
+    assert result.ledger_row["target_weight_raw_sum"] == pytest.approx(0.60)
+    assert result.ledger_row["target_weight_source"] == "external_target_weight"
+
+
+def test_legacy_script_rebalance_delegates_to_canonical_target_weight_path():
+    signal_df = _signal_df()
+    signal_df["target_weight"] = [0.10, 0.50]
+
+    orders_df, _fills_df, new_state = _legacy_script_rebalance(
+        signal_df=signal_df,
+        state={"cash": 1_000_000.0, "positions": {}},
+        bars_idx=_bars_idx_for_date("2026-03-21"),
+        signal_date=pd.Timestamp("2026-03-20"),
+        trade_date=pd.Timestamp("2026-03-21"),
+        top_n=2,
+        total_target_pos=0.6,
+        max_single_pos=0.6,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+        run_id="legacy_wrapper_target_weight",
+    )
+
+    buys = orders_df[orders_df["side"] == "BUY"].set_index("code")
+    assert float(buys.loc["000001", "target_weight"]) == 0.10
+    assert float(buys.loc["000002", "target_weight"]) == 0.50
+    assert str(buys.loc["000001", "target_weight_source"]) == "external_target_weight"
+    assert int(buys.loc["000002", "requested_qty"]) > 20_000
+    assert int(buys.loc["000001", "requested_qty"]) < 12_000
+    assert new_state["run_info"]["target_weight_sum"] == pytest.approx(0.60)
 
 
 def test_rebalance_blocks_limit_up_entry(tmp_path):

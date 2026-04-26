@@ -34,6 +34,16 @@ def _bars_window() -> pd.DataFrame:
     )
 
 
+def _bars_window_with_next_day() -> pd.DataFrame:
+    base = _bars_window()
+    next_day = base.copy()
+    next_day["trade_date"] = pd.Timestamp("2026-04-10")
+    next_day.loc[next_day["ts_code"] == "000001", "open"] = 1.0
+    next_day.loc[next_day["ts_code"] == "000001", "close"] = 1.0
+    next_day.loc[next_day["ts_code"] == "000002", ["open", "high", "low", "close"]] = [3.0, 3.1, 2.9, 3.0]
+    return pd.concat([base, next_day], ignore_index=True)
+
+
 def _set_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MFTS_SIGNAL_PRETRADE_GATE", "true")
     monkeypatch.setenv("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", "false")
@@ -71,6 +81,51 @@ def test_signal_pretrade_gate_blocks_min_price(monkeypatch: pytest.MonkeyPatch):
     assert str(info["top_reason"]) == "min_price"
     assert set(gated["ts_code"].astype(str)) == {"000001", "000003"}
     assert set(blocked["code"].astype(str)) == {"000002"}
+
+
+def test_signal_pretrade_gate_defaults_to_research_safe_signal_day(monkeypatch: pytest.MonkeyPatch):
+    _set_base_env(monkeypatch)
+    monkeypatch.delenv("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", raising=False)
+    monkeypatch.setenv("MFTS_RISK_MIN_PRICE", "2.0")
+
+    gated, _blocked, info = _apply_signal_pretrade_gate(
+        ranking_pool=_ranking_pool(),
+        ranking_col="refactor_score",
+        bars_window_df=_bars_window_with_next_day(),
+        signal_date=pd.Timestamp("2026-04-09"),
+        top_n=2,
+        regime_position_range="60%-80%",
+        regime_single_stock_max="10%",
+        industry_map={"000001": "银行", "000002": "银行", "000003": "医药"},
+    )
+
+    assert info["trade_date"] == "2026-04-09"
+    assert int(info["research_safe_mode"]) == 1
+    assert int(info["pretrade_uses_next_trade_day"]) == 0
+    assert "000001" in set(gated["ts_code"].astype(str))
+
+
+def test_signal_pretrade_gate_next_day_mode_is_explicit_expost(monkeypatch: pytest.MonkeyPatch):
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY", "true")
+    monkeypatch.setenv("MFTS_RISK_MIN_PRICE", "2.0")
+
+    gated, blocked, info = _apply_signal_pretrade_gate(
+        ranking_pool=_ranking_pool(),
+        ranking_col="refactor_score",
+        bars_window_df=_bars_window_with_next_day(),
+        signal_date=pd.Timestamp("2026-04-09"),
+        top_n=2,
+        regime_position_range="60%-80%",
+        regime_single_stock_max="10%",
+        industry_map={"000001": "银行", "000002": "银行", "000003": "医药"},
+    )
+
+    assert info["trade_date"] == "2026-04-10"
+    assert int(info["research_safe_mode"]) == 0
+    assert int(info["pretrade_uses_next_trade_day"]) == 1
+    assert "000001" not in set(gated["ts_code"].astype(str))
+    assert "000001" in set(blocked["code"].astype(str))
 
 
 def test_signal_pretrade_gate_fallback_when_kept_insufficient(monkeypatch: pytest.MonkeyPatch):

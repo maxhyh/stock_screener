@@ -466,6 +466,11 @@ python scripts/quant_signal_pretrade_alignment_report.py \
 # python scripts/quant_p2_paper_trade.py --broker paper --channel paper_pretrade_diag --top-n 30 --date 20260401 ...
 ```
 
+说明：`daily_ml_select.py` 的信号端前置风控默认采用 research-safe 口径，即
+`MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY=false`，只使用信号日可观察信息。若要做
+P2 对齐或事后执行诊断，可显式设置 `MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY=true`，
+但该模式不得作为研究选股或 profile promotion 的默认证据。
+
 新增输出：
 - `output/risk/risk_exposure_summary_*.csv`：状态层风险暴露汇总
 - `output/risk/risk_exposure_industry_*.csv`：行业暴露汇总

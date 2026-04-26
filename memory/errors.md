@@ -4,6 +4,24 @@ Record recurring mistakes and failure modes. Keep this practical: symptom, cause
 
 ## Error Log
 
+### 2026-04-26 | P2 replay can become invalid if a script-level rebalance path recomputes target weights
+- tags: p2, target_weight, promotion
+- status: active
+- severity: critical
+- mitigation: Use `core.execution.paper_broker.PaperBroker` as the canonical rebalance path and require tests proving external `target_weight` is preserved.
+- evidence: External expert review found that legacy `_rebalance` code in `scripts/quant_p2_paper_trade.py` could overwrite optimizer weights and double-apply total position.
+
+Rolling replay and promotion gates become unreliable if P2 requested weights are not the same weights produced by the portfolio layer.
+
+### 2026-04-26 | Next-day pretrade gates can leak execution outcomes into research selection
+- tags: lookahead, pretrade, research_safe
+- status: active
+- severity: critical
+- mitigation: Default daily selection to signal-day pretrade checks; require explicit opt-in for next-trade-day replay diagnostics.
+- evidence: External expert review flagged `MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY` default behavior and forward buffers as a possible ex-post tradability leak.
+
+A-share next-day buy/sell availability must be modeled as execution outcome unless explicitly labeled as replay evidence.
+
 ### 2026-04-26 | Low-invested candidates can look safer than they are
 - tags: promotion, target_weight, cash_drag
 - status: active

@@ -4,6 +4,24 @@ Append durable research, execution, and governance learnings here. Keep entries 
 
 ## Learnings Log
 
+### 2026-04-26 | P2 execution evidence must use the canonical broker path
+- tags: p2, target_weight, execution, promotion
+- reusable: yes
+- confidence: high
+- evidence: External expert review flagged that legacy script-level `_rebalance` in `scripts/quant_p2_paper_trade.py` could recompute score weights and double-scale total position, while `core.execution.paper_broker.PaperBroker` already respected external `target_weight`.
+- action: Keep P2 rolling replay on the canonical broker path; any compatibility wrapper must delegate to `PaperBroker.rebalance_on_state` and preserve `target_weight_source`.
+
+Promotion evidence is only trustworthy if daily target weights, P2 requested weights, and ledger weights share one execution implementation.
+
+### 2026-04-26 | Signal pretrade defaults must be research-safe
+- tags: pretrade, lookahead, research_safe, a_share
+- reusable: yes
+- confidence: high
+- evidence: External expert review highlighted that default next-trade-day pretrade checks in daily selection could leak ex-post tradability into research candidates.
+- action: Default `MFTS_SIGNAL_PRETRADE_USE_NEXT_TRADE_DAY` to false in `daily_ml_select.py`; use explicit next-day mode only for replay/expost diagnostics.
+
+T+1 tradability is execution evidence, not a default research input.
+
 ### 2026-04-26 | v7 industry balance reduces industry concentration but fails promotion
 - tags: p2, promotion, industry, adv, target_weight
 - reusable: yes

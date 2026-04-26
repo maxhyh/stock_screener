@@ -40,12 +40,12 @@ from core.platform import (
     write_run_manifest,
 )
 from core.execution import create_broker
+from core.execution.paper_broker import PaperBroker
 from core.risk import PreTradeRiskConfig, apply_pretrade_risk_gates, load_industry_map
 from core.risk.pretrade import _load_blacklist
 from utils.code_utils import limit_ratio_for_stock, normalize_ts_code, normalize_ts_code_series
 from utils.metadata_guard import evaluate_metadata_guard, load_metadata_health
 from utils.output_paths import get_output_dirs, list_dual
-from utils.portfolio_weights import build_score_weights
 
 OUTPUT_DIR = Path(BASE_DIR) / "output"
 DATA_DIR = Path(BASE_DIR) / "data"
@@ -714,262 +714,28 @@ def _rebalance(
     stamp_tax_bps: float,
     run_id: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    positions_raw = state.get("positions", {})
-    positions = {normalize_ts_code(k): dict(v) for k, v in positions_raw.items() if normalize_ts_code(k)}
-    cash = _safe_float(state.get("cash", 0.0), 0.0)
-
-    market_value_pre, px_map_pre = _mark_to_market(positions, bars_idx, trade_date)
-    nav_pre = cash + market_value_pre
-
-    picks = signal_df.head(max(1, top_n)).copy()
-    score = pd.to_numeric(picks["ML评分"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    total_target_pos = min(max(float(total_target_pos), 0.0), 1.0)
-    max_single_pos = min(max(float(max_single_pos), 0.0), 1.0)
-    w = build_score_weights(score, total_target=total_target_pos, single_cap=max_single_pos)
-    if len(w) != len(picks):
-        w = np.zeros(len(picks), dtype=float)
-    picks["target_weight"] = w
-
-    target_value_total = nav_pre * total_target_pos
-    target_qty_map: dict[str, int] = {}
-    name_map: dict[str, str] = {}
-    rank_map: dict[str, int] = {}
-    for _, row in picks.iterrows():
-        code = normalize_ts_code(row.get("代码", ""))
-        if not code:
-            continue
-        name = str(row.get("名称", "") or code)
-        rank = int(_safe_float(row.get("排名_num", 9999), 9999))
-        tgt_w = _safe_float(row.get("target_weight", 0.0), 0.0)
-        bar = _get_bar_row(bars_idx, trade_date, code)
-        open_px = _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan
-        qty = 0
-        if np.isfinite(open_px) and open_px > 0 and tgt_w > 0:
-            tgt_value = target_value_total * tgt_w
-            qty = int(np.floor(tgt_value / open_px / lot_size) * lot_size)
-        target_qty_map[code] = max(0, qty)
-        name_map[code] = name
-        rank_map[code] = rank
-
-    current_qty_map = {code: int(v.get("qty", 0)) for code, v in positions.items()}
-    all_codes = sorted(set(current_qty_map.keys()) | set(target_qty_map.keys()))
-
-    order_rows: list[dict[str, object]] = []
-    fill_rows: list[dict[str, object]] = []
-
-    # 先卖后买
-    for code in all_codes:
-        cur = int(current_qty_map.get(code, 0))
-        tgt = int(target_qty_map.get(code, 0))
-        if cur <= tgt:
-            continue
-        qty_req = cur - tgt
-        name = name_map.get(code, str(positions.get(code, {}).get("name", code)))
-        bar = _get_bar_row(bars_idx, trade_date, code)
-        if not _can_exit(bar, code, name):
-            order_rows.append(
-                {
-                    "run_id": run_id,
-                    "signal_date": signal_date.strftime("%Y-%m-%d"),
-                    "trade_date": trade_date.strftime("%Y-%m-%d"),
-                    "code": code,
-                    "name": name,
-                    "side": "SELL",
-                    "rank": int(rank_map.get(code, 9999)),
-                    "current_qty": cur,
-                    "target_qty": tgt,
-                    "requested_qty": qty_req,
-                    "filled_qty": 0,
-                    "status": "blocked",
-                    "reason": "exit_not_tradable",
-                    "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
-                }
-            )
-            continue
-
-        open_px = _safe_float(bar.get("open", np.nan), np.nan)
-        fill_px = open_px * (1.0 - slippage_bps / 10000.0)
-        gross = qty_req * fill_px
-        fee = gross * fee_bps / 10000.0
-        stamp = gross * stamp_tax_bps / 10000.0
-        net = gross - fee - stamp
-        cash += net
-
-        new_qty = cur - qty_req
-        if new_qty <= 0:
-            positions.pop(code, None)
-        else:
-            positions[code]["qty"] = int(new_qty)
-        order_rows.append(
-            {
-                "run_id": run_id,
-                "signal_date": signal_date.strftime("%Y-%m-%d"),
-                "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "code": code,
-                "name": name,
-                "side": "SELL",
-                "rank": int(rank_map.get(code, 9999)),
-                "current_qty": cur,
-                "target_qty": tgt,
-                "requested_qty": qty_req,
-                "filled_qty": qty_req,
-                "status": "filled",
-                "reason": "ok",
-                "open_price": open_px,
-            }
-        )
-        fill_rows.append(
-            {
-                "run_id": run_id,
-                "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "code": code,
-                "name": name,
-                "side": "SELL",
-                "qty": qty_req,
-                "price": fill_px,
-                "gross_amount": gross,
-                "fee": fee,
-                "stamp_tax": stamp,
-                "net_amount": net,
-            }
-        )
-
-    for code in sorted(all_codes, key=lambda x: rank_map.get(x, 9999)):
-        cur = int(positions.get(code, {}).get("qty", 0))
-        tgt = int(target_qty_map.get(code, 0))
-        if tgt <= cur:
-            continue
-        qty_req = tgt - cur
-        name = name_map.get(code, str(positions.get(code, {}).get("name", code)))
-        bar = _get_bar_row(bars_idx, trade_date, code)
-        if not _can_enter(bar, code, name):
-            order_rows.append(
-                {
-                    "run_id": run_id,
-                    "signal_date": signal_date.strftime("%Y-%m-%d"),
-                    "trade_date": trade_date.strftime("%Y-%m-%d"),
-                    "code": code,
-                    "name": name,
-                    "side": "BUY",
-                    "rank": int(rank_map.get(code, 9999)),
-                    "current_qty": cur,
-                    "target_qty": tgt,
-                    "requested_qty": qty_req,
-                    "filled_qty": 0,
-                    "status": "blocked",
-                    "reason": "entry_not_tradable",
-                    "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
-                }
-            )
-            continue
-
-        open_px = _safe_float(bar.get("open", np.nan), np.nan)
-        fill_px = open_px * (1.0 + slippage_bps / 10000.0)
-        fee_rate = fee_bps / 10000.0
-        unit_cost = fill_px * (1.0 + fee_rate)
-        affordable = int(np.floor(cash / max(unit_cost, 1e-9) / lot_size) * lot_size)
-        qty_fill = min(qty_req, max(0, affordable))
-        if qty_fill <= 0:
-            order_rows.append(
-                {
-                    "run_id": run_id,
-                    "signal_date": signal_date.strftime("%Y-%m-%d"),
-                    "trade_date": trade_date.strftime("%Y-%m-%d"),
-                    "code": code,
-                    "name": name,
-                    "side": "BUY",
-                    "rank": int(rank_map.get(code, 9999)),
-                    "current_qty": cur,
-                    "target_qty": tgt,
-                    "requested_qty": qty_req,
-                    "filled_qty": 0,
-                    "status": "rejected",
-                    "reason": "insufficient_cash",
-                    "open_price": open_px,
-                }
-            )
-            continue
-
-        gross = qty_fill * fill_px
-        fee = gross * fee_rate
-        cash -= (gross + fee)
-        prev_qty = int(positions.get(code, {}).get("qty", 0))
-        prev_cost = _safe_float(positions.get(code, {}).get("avg_cost", 0.0), 0.0)
-        new_qty = prev_qty + qty_fill
-        new_cost = (prev_qty * prev_cost + qty_fill * fill_px) / max(new_qty, 1)
-        positions[code] = {
-            "name": name,
-            "qty": int(new_qty),
-            "avg_cost": float(new_cost),
-            "last_trade_date": trade_date.strftime("%Y-%m-%d"),
-        }
-
-        status = "filled" if qty_fill == qty_req else "partial"
-        reason = "ok" if status == "filled" else "cash_limited"
-        order_rows.append(
-            {
-                "run_id": run_id,
-                "signal_date": signal_date.strftime("%Y-%m-%d"),
-                "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "code": code,
-                "name": name,
-                "side": "BUY",
-                "rank": int(rank_map.get(code, 9999)),
-                "current_qty": cur,
-                "target_qty": tgt,
-                "requested_qty": qty_req,
-                "filled_qty": qty_fill,
-                "status": status,
-                "reason": reason,
-                "open_price": open_px,
-            }
-        )
-        fill_rows.append(
-            {
-                "run_id": run_id,
-                "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "code": code,
-                "name": name,
-                "side": "BUY",
-                "qty": qty_fill,
-                "price": fill_px,
-                "gross_amount": gross,
-                "fee": fee,
-                "stamp_tax": 0.0,
-                "net_amount": -(gross + fee),
-            }
-        )
-
-    # 再平衡后估值
-    market_value_post, _ = _mark_to_market(positions, bars_idx, trade_date)
-    nav_post = cash + market_value_post
-    turnover = float(np.sum(np.abs([_safe_float(x.get("net_amount", 0.0), 0.0) for x in fill_rows])))
-
-    orders_df = pd.DataFrame(order_rows)
-    fills_df = pd.DataFrame(fill_rows)
-    new_state = {
-        "version": 1,
-        "cash": float(cash),
-        "positions": positions,
-        "nav": float(nav_post),
-        "nav_pre": float(nav_pre),
-        "last_trade_date": trade_date.strftime("%Y-%m-%d"),
-        "last_signal_date": signal_date.strftime("%Y-%m-%d"),
-    }
-    run_info = {
-        "nav_pre": float(nav_pre),
-        "nav_post": float(nav_post),
-        "cash_post": float(cash),
-        "market_value_post": float(market_value_post),
-        "position_count_post": int(sum(1 for v in positions.values() if int(v.get("qty", 0)) > 0)),
-        "filled_orders": int((orders_df["status"] == "filled").sum()) if not orders_df.empty else 0,
-        "partial_orders": int((orders_df["status"] == "partial").sum()) if not orders_df.empty else 0,
-        "blocked_orders": int((orders_df["status"] == "blocked").sum()) if not orders_df.empty else 0,
-        "rejected_orders": int((orders_df["status"] == "rejected").sum()) if not orders_df.empty else 0,
-        "turnover": turnover,
-    }
-    new_state["run_info"] = run_info
-    return orders_df, fills_df, new_state
+    broker = PaperBroker(
+        state_file=Path("__legacy_in_memory_paper_state.json"),
+        initial_capital=max(100000.0, _safe_float(state.get("cash", 0.0), 0.0)),
+        lot_size=max(1, int(lot_size)),
+        fee_bps=max(0.0, float(fee_bps)),
+        slippage_bps=max(0.0, float(slippage_bps)),
+        stamp_tax_bps=max(0.0, float(stamp_tax_bps)),
+    )
+    result = broker.rebalance_on_state(
+        state=state,
+        signal_df=signal_df,
+        signal_date=signal_date,
+        trade_date=trade_date,
+        bars_idx=bars_idx,
+        run_id=run_id,
+        top_n=top_n,
+        target_total_pos=total_target_pos,
+        max_single_pos=max_single_pos,
+    )
+    new_state = dict(result.state)
+    new_state["run_info"] = dict(result.ledger_row)
+    return result.orders_df, result.fills_df, new_state
 
 
 def _build_parser() -> argparse.ArgumentParser:
