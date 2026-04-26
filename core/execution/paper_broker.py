@@ -193,7 +193,15 @@ class PaperBroker(BrokerAdapter):
         market_value_pre, _ = _mark_to_market(positions, bars_idx, trade_date)
         nav_pre = cash + market_value_pre
 
-        picks = signal_df.head(max(1, top_n)).copy()
+        external_all = (
+            pd.to_numeric(signal_df.get("target_weight", pd.Series(dtype=float)), errors="coerce").fillna(0.0).clip(lower=0.0)
+            if "target_weight" in signal_df.columns
+            else pd.Series(dtype=float)
+        )
+        if len(external_all) == len(signal_df) and float(external_all.sum()) > 0:
+            picks = signal_df.loc[external_all > 0].copy()
+        else:
+            picks = signal_df.head(max(1, top_n)).copy()
         target_total_pos = min(max(float(target_total_pos), 0.0), 1.0)
         max_single_pos = min(max(float(max_single_pos), 0.0), 1.0)
         external_weight_raw = (

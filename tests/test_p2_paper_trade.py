@@ -51,6 +51,24 @@ def _signal_df() -> pd.DataFrame:
     )
 
 
+def _bars_idx_three_for_date(trade_date: str) -> pd.DataFrame:
+    td = pd.Timestamp(trade_date)
+    df = pd.DataFrame(
+        {
+            "trade_date": [td, td, td],
+            "code": ["000001", "000002", "000003"],
+            "open": [10.0, 20.0, 30.0],
+            "high": [10.2, 20.3, 30.4],
+            "low": [9.9, 19.8, 29.7],
+            "close": [10.1, 20.1, 30.2],
+            "vol": [1_000_000, 1_500_000, 1_800_000],
+            "amount": [100_000_000, 200_000_000, 300_000_000],
+            "prev_close": [9.9, 19.8, 29.8],
+        }
+    )
+    return df.set_index(["trade_date", "code"]).sort_index()
+
+
 def test_create_broker_returns_paper_instance(tmp_path):
     broker = create_broker(
         "paper",
@@ -128,6 +146,43 @@ def test_rebalance_uses_external_target_weight_when_present(tmp_path):
     assert result.ledger_row["target_weight_sum"] == pytest.approx(0.60)
     assert result.ledger_row["target_weight_raw_sum"] == pytest.approx(0.60)
     assert result.ledger_row["target_weight_source"] == "external_target_weight"
+
+
+def test_rebalance_uses_all_positive_external_target_weights_beyond_topn(tmp_path):
+    broker = PaperBroker(
+        state_file=tmp_path / "paper_state.json",
+        initial_capital=1_000_000,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+    )
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003"],
+            "名称": ["A", "B", "C"],
+            "ML评分": [0.9, 0.8, 0.7],
+            "排名_num": [1, 2, 3],
+            "target_weight": [0.10, 0.20, 0.30],
+        }
+    )
+
+    result = broker.rebalance_on_state(
+        state={"cash": 1_000_000.0, "positions": {}},
+        signal_df=signal_df,
+        bars_idx=_bars_idx_three_for_date("2026-03-21"),
+        signal_date=pd.Timestamp("2026-03-20"),
+        trade_date=pd.Timestamp("2026-03-21"),
+        run_id="reserve_pool_external_weight",
+        top_n=2,
+        target_total_pos=0.6,
+        max_single_pos=0.6,
+    )
+
+    buys = result.orders_df[result.orders_df["side"] == "BUY"].set_index("code")
+    assert set(buys.index) == {"000001", "000002", "000003"}
+    assert float(buys.loc["000003", "target_weight"]) == 0.30
+    assert result.ledger_row["target_weight_sum"] == pytest.approx(0.60)
 
 
 def test_legacy_script_rebalance_delegates_to_canonical_target_weight_path():

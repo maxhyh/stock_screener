@@ -197,6 +197,56 @@ def test_pretrade_risk_reweights_survivors_after_blocked_names():
     assert stats["reweight_rounds"] >= 2
 
 
+def test_pretrade_risk_replaces_locked_entry_with_reserve_when_max_names_set():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003"],
+            "名称": ["A", "B", "C"],
+            "ML评分": [1.0, 0.9, 0.8],
+            "排名_num": [1, 2, 3],
+        }
+    )
+    bars = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp("2026-04-09")] * 3,
+            "code": ["000001", "000002", "000003"],
+            "open": [11.0, 8.0, 10.0],
+            "high": [11.0, 8.2, 10.2],
+            "low": [11.0, 7.9, 9.9],
+            "close": [11.0, 8.1, 10.1],
+            "prev_close": [10.0, 8.0, 10.0],
+            "amount": [100_000_000.0, 100_000_000.0, 100_000_000.0],
+            "vol": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+        }
+    ).set_index(["trade_date", "code"]).sort_index()
+    cfg = PreTradeRiskConfig(
+        enabled=True,
+        capital_base=1_000_000,
+        max_industry_weight=1.0,
+        max_adv_participation=0.50,
+        min_price=2.0,
+        blacklist_codes=set(),
+        max_names=2,
+        block_entry_not_tradable=True,
+    )
+
+    kept, blocked, stats = apply_pretrade_risk_gates(
+        signal_df=signal_df,
+        bars_idx=bars,
+        trade_date=pd.Timestamp("2026-04-09"),
+        total_target_pos=0.6,
+        max_single_pos=0.4,
+        cfg=cfg,
+        industry_map={"000001": "银行", "000002": "电子", "000003": "医药"},
+    )
+
+    assert "000001" in set(blocked["code"].astype(str))
+    assert "entry_not_tradable" in blocked.loc[blocked["code"] == "000001", "reasons"].iloc[0]
+    assert set(kept["代码"].astype(str)) == {"000002", "000003"}
+    assert stats["entry_not_tradable_hit"] == 1
+    assert stats["max_names"] == 2
+
+
 def test_pretrade_risk_preserves_external_target_weight_without_reweight():
     signal_df = pd.DataFrame(
         {

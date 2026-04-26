@@ -134,6 +134,37 @@ def test_build_portfolio_decision_redistributes_clipped_capacity():
     assert redistributed.selected["constraint_reason"].astype(str).str.contains("redistributed_in").any()
 
 
+def test_build_portfolio_decision_uses_reserve_rows_after_primary_capacity_clip():
+    candidates = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003"],
+            "ML评分": [0.95, 0.90, 0.85],
+            "industry": ["银行", "电子", "医药"],
+            "amount_ma20": [1_000_000.0, 100_000_000.0, 100_000_000.0],
+        }
+    )
+
+    decision = build_portfolio_decision(
+        candidates,
+        PortfolioConstraints(
+            total_target=0.60,
+            single_cap=0.30,
+            max_names=2,
+            adv_participation_cap=0.04,
+            capital_base=1_000_000.0,
+            amount_col="amount_ma20",
+            redistribute_clipped=True,
+        ),
+    )
+
+    selected = decision.selected.set_index("代码")
+    assert "000003" in selected.index
+    assert float(selected.loc["000003", "target_weight_raw"]) == 0.0
+    assert float(selected.loc["000003", "target_weight"]) > 0.0
+    assert "redistributed_in" in str(selected.loc["000003", "constraint_reason"])
+    assert decision.diagnostics["constraints"]["max_names"] == 2
+
+
 def test_build_portfolio_decision_redistribution_respects_industry_cap():
     candidates = pd.DataFrame(
         {

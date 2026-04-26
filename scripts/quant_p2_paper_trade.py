@@ -82,6 +82,11 @@ def _load_default_profile_values() -> dict[str, float]:
         "target_capacity_amount_col": "amount_ma20",
         "target_capacity_amount_buffer": 1.0,
         "redistribute_clipped_weight": False,
+        "reserve_pool_enabled": False,
+        "optimizer_candidate_pool_multiplier": 1.0,
+        "optimizer_candidate_pool_max_n": 0,
+        "reserve_candidate_count": 0,
+        "reserve_reoptimize_rounds": 2,
         "impact_model": "sqrt",
         "impact_base_bps": 0.0,
         "impact_participation_bps": 0.0,
@@ -153,6 +158,21 @@ def _load_default_profile_values() -> dict[str, float]:
                 "y",
                 "on",
             }
+        raw_reserve = p.get("reserve_pool_enabled", defaults["reserve_pool_enabled"])
+        if isinstance(raw_reserve, bool):
+            defaults["reserve_pool_enabled"] = raw_reserve
+        else:
+            defaults["reserve_pool_enabled"] = str(raw_reserve).strip().lower() in {"1", "true", "yes", "y", "on"}
+        defaults["optimizer_candidate_pool_multiplier"] = float(
+            p.get("optimizer_candidate_pool_multiplier", defaults["optimizer_candidate_pool_multiplier"])
+        )
+        defaults["optimizer_candidate_pool_max_n"] = int(
+            float(p.get("optimizer_candidate_pool_max_n", defaults["optimizer_candidate_pool_max_n"]))
+        )
+        defaults["reserve_candidate_count"] = int(float(p.get("reserve_candidate_count", defaults["reserve_candidate_count"])))
+        defaults["reserve_reoptimize_rounds"] = int(
+            float(p.get("reserve_reoptimize_rounds", defaults["reserve_reoptimize_rounds"]))
+        )
         defaults["impact_model"] = str(p.get("impact_model", defaults["impact_model"]))
         defaults["impact_base_bps"] = float(p.get("impact_base_bps", defaults["impact_base_bps"]))
         defaults["impact_participation_bps"] = float(p.get("impact_participation_bps", defaults["impact_participation_bps"]))
@@ -213,6 +233,26 @@ def _parse_bool_like(v: object, default: bool = False) -> bool:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def _profile_int(profile_cfg: dict[str, object], key: str, default: int = 0) -> int:
+    try:
+        return int(float(profile_cfg.get(key, default)))
+    except Exception:
+        return int(default)
+
+
+def _resolve_candidate_pool_n(top_n: int, profile_cfg: dict[str, object], available_n: int | None = None) -> int:
+    top_n = max(1, int(top_n))
+    multiplier = max(1.0, _safe_float(profile_cfg.get("optimizer_candidate_pool_multiplier", 1.0), 1.0))
+    reserve_count = max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))
+    pool_n = max(top_n, int(np.ceil(float(top_n) * multiplier)), top_n + reserve_count)
+    max_n = max(0, _profile_int(profile_cfg, "optimizer_candidate_pool_max_n", 0))
+    if max_n > 0:
+        pool_n = min(pool_n, max(top_n, max_n))
+    if available_n is not None:
+        pool_n = min(pool_n, max(1, int(available_n)))
+    return max(1, int(pool_n))
 
 
 def _sanitize_channel(name: object, fallback: str) -> str:
@@ -400,6 +440,7 @@ def _assign_profile_target_weights(
     total_target_pos: float,
     max_single_pos: float,
     industry_map: dict[str, str],
+    primary_top_n: int | None = None,
 ) -> pd.DataFrame:
     work = signal_df.copy()
     if "target_weight" in work.columns:
@@ -440,6 +481,8 @@ def _assign_profile_target_weights(
             industry_cap=industry_cap,
             adv_participation_cap=adv_cap,
             capital_base=max(100000.0, _safe_float(profile_cfg.get("target_capital_base", 1_000_000.0), 1_000_000.0)),
+            max_names=max(0, int(primary_top_n or 0)),
+            min_names=max(0, _profile_int(profile_cfg, "min_valid_positions", 0)),
             score_col=score_col,
             code_col="代码",
             industry_col="industry",
@@ -909,9 +952,10 @@ def main() -> int:
 
     signal_date = _extract_signal_date(signal_file)
     _log(f"读取推荐文件: {signal_file} (signal_date={signal_date.date()})")
+    candidate_pool_n = _resolve_candidate_pool_n(effective_top_n, DEFAULTS)
     signal_df = _load_signal_df(
         signal_file,
-        top_n=effective_top_n,
+        top_n=candidate_pool_n,
         include_bj9=bool(args.include_bj9),
         exclude_st=bool(args.exclude_st),
     )
@@ -957,42 +1001,123 @@ def main() -> int:
         max_style_vol_exposure_abs=max(0.0, float(args.risk_max_style_vol_exposure_abs)),
         style_lb_short=max(5, int(args.risk_style_lb_short)),
         style_lb_beta=max(10, int(args.risk_style_lb_beta)),
+        max_names=int(effective_top_n),
+        block_entry_not_tradable=True,
         blacklist_codes=_load_blacklist(args.risk_blacklist_file),
     )
     industry_map = load_industry_map(DATA_DIR)
     signal_df = _enrich_signal_amount_ma20(signal_df, bars_idx, signal_date, trade_date=trade_date)
-    signal_df = _assign_profile_target_weights(
-        signal_df=signal_df.head(effective_top_n),
-        profile_cfg=DEFAULTS,
-        total_target_pos=total_target,
-        max_single_pos=max_single,
-        industry_map=industry_map,
-    )
     pretrade_state = _load_state(
         Path(args.state_file),
         initial_capital=max(100000.0, float(args.initial_capital)),
         reset_state=bool(args.reset_state),
     )
-    gated_signal_df, risk_block_df, risk_stats = apply_pretrade_risk_gates(
-        signal_df=signal_df.head(effective_top_n),
-        bars_idx=bars_idx,
-        trade_date=trade_date,
-        total_target_pos=total_target,
-        max_single_pos=max_single,
-        cfg=risk_cfg,
-        industry_map=industry_map,
-        current_positions=pretrade_state.get("positions", {}) if isinstance(pretrade_state, dict) else {},
+    pretrade_input = signal_df.drop(
+        columns=[
+            "target_weight",
+            "target_weight_raw",
+            "target_weight_source",
+            "target_weight_checksum",
+            "participation_pct",
+            "impact_cost_bps",
+            "unfilled_target_weight",
+            "industry_weight_post",
+            "constraint_reason",
+        ],
+        errors="ignore",
     )
+    reserve_rounds = max(
+        1,
+        int(DEFAULTS.get("reserve_reoptimize_rounds", 2)) if bool(DEFAULTS.get("reserve_pool_enabled", False)) else 1,
+    )
+    risk_block_frames: list[pd.DataFrame] = []
+    risk_stats: dict[str, object] = {}
+    gated_signal_df = pd.DataFrame()
+    working_pool = pretrade_input.copy()
+    for round_idx in range(reserve_rounds):
+        pre_kept_df, pre_block_df, pre_stats = apply_pretrade_risk_gates(
+            signal_df=working_pool,
+            bars_idx=bars_idx,
+            trade_date=trade_date,
+            total_target_pos=total_target,
+            max_single_pos=max_single,
+            cfg=risk_cfg,
+            industry_map=industry_map,
+            current_positions=pretrade_state.get("positions", {}) if isinstance(pretrade_state, dict) else {},
+        )
+        if not pre_block_df.empty:
+            pre_block_df = pre_block_df.copy()
+            pre_block_df["reserve_phase"] = "pre_optimizer"
+            pre_block_df["reserve_round"] = int(round_idx + 1)
+            risk_block_frames.append(pre_block_df)
+        if pre_kept_df.empty:
+            risk_stats = dict(pre_stats)
+            gated_signal_df = pre_kept_df
+            break
+
+        optimized_df = _assign_profile_target_weights(
+            signal_df=pre_kept_df,
+            profile_cfg=DEFAULTS,
+            total_target_pos=total_target,
+            max_single_pos=max_single,
+            industry_map=industry_map,
+            primary_top_n=effective_top_n,
+        )
+        final_kept_df, final_block_df, final_stats = apply_pretrade_risk_gates(
+            signal_df=optimized_df,
+            bars_idx=bars_idx,
+            trade_date=trade_date,
+            total_target_pos=total_target,
+            max_single_pos=max_single,
+            cfg=risk_cfg,
+            industry_map=industry_map,
+            current_positions=pretrade_state.get("positions", {}) if isinstance(pretrade_state, dict) else {},
+        )
+        if not final_block_df.empty:
+            final_block_df = final_block_df.copy()
+            final_block_df["reserve_phase"] = "post_optimizer"
+            final_block_df["reserve_round"] = int(round_idx + 1)
+            risk_block_frames.append(final_block_df)
+        gated_signal_df = final_kept_df
+        risk_stats = dict(final_stats)
+        risk_stats["pre_optimizer_blocked_count"] = int(pre_stats.get("blocked_count", 0))
+        risk_stats["post_optimizer_blocked_count"] = int(final_stats.get("blocked_count", 0))
+        risk_stats["reserve_rounds_used"] = int(round_idx + 1)
+        risk_stats["reserve_candidate_pool_n"] = int(len(pretrade_input))
+        risk_stats["reserve_enabled"] = int(bool(DEFAULTS.get("reserve_pool_enabled", False)))
+        if final_block_df.empty:
+            break
+        blocked_codes = set(final_block_df.get("code", pd.Series(dtype=str)).astype(str).map(normalize_ts_code).tolist())
+        working_pool = pre_kept_df[~pre_kept_df["代码"].astype(str).map(normalize_ts_code).isin(blocked_codes)].copy()
+        if working_pool.empty:
+            break
+
+    risk_block_df = pd.concat(risk_block_frames, ignore_index=True) if risk_block_frames else pd.DataFrame()
+    risk_stats.setdefault("reserve_candidate_pool_n", int(len(pretrade_input)))
+    risk_stats.setdefault("reserve_enabled", int(bool(DEFAULTS.get("reserve_pool_enabled", False))))
+    risk_stats.setdefault("reserve_rounds_used", 0)
+    if not risk_block_df.empty and "reasons" in risk_block_df.columns:
+        reason_s = risk_block_df["reasons"].astype(str)
+        risk_stats["blocked_count"] = int(len(risk_block_df))
+        risk_stats["blocked_rate_pct"] = float(len(risk_block_df) / max(len(pretrade_input), 1) * 100.0)
+        risk_stats["industry_limits_hit"] = int(reason_s.str.contains("industry_weight").sum())
+        risk_stats["post_trade_industry_limits_hit"] = int(reason_s.str.contains("post_trade_industry_clip").sum())
+        risk_stats["unknown_industry_limits_hit"] = int(reason_s.str.contains("industry_weight_unknown").sum())
+        risk_stats["adv_limits_hit"] = int(reason_s.str.contains("adv_participation").sum())
+        risk_stats["entry_not_tradable_hit"] = int(reason_s.str.contains("entry_not_tradable").sum())
     _log(
         "风控门禁统计: "
         f"input={int(risk_stats.get('input_count', 0))}, "
         f"kept={int(risk_stats.get('kept_count', 0))}, "
         f"blocked={int(risk_stats.get('blocked_count', 0))}, "
+        f"reserve_pool={int(risk_stats.get('reserve_candidate_pool_n', len(pretrade_input)))}, "
+        f"reserve_rounds={int(risk_stats.get('reserve_rounds_used', 0))}, "
         f"industry_hit={int(risk_stats.get('industry_limits_hit', 0))}, "
         f"post_trade_industry_hit={int(risk_stats.get('post_trade_industry_limits_hit', 0))}, "
         f"missing_industry={int(risk_stats.get('missing_industry_count', 0))}, "
         f"unknown_industry_hit={int(risk_stats.get('unknown_industry_limits_hit', 0))}, "
         f"adv_hit={int(risk_stats.get('adv_limits_hit', 0))}, "
+        f"entry_not_tradable_hit={int(risk_stats.get('entry_not_tradable_hit', 0))}, "
         f"style_hit={int(risk_stats.get('style_limits_hit', 0))}"
     )
     if gated_signal_df.empty:
@@ -1089,6 +1214,11 @@ def main() -> int:
     ledger_row["risk_kept_count"] = int(risk_stats.get("kept_count", 0))
     ledger_row["risk_blocked_count"] = int(risk_stats.get("blocked_count", 0))
     ledger_row["risk_blocked_rate_pct"] = float(risk_stats.get("blocked_rate_pct", 0.0))
+    ledger_row["reserve_enabled"] = int(risk_stats.get("reserve_enabled", int(bool(DEFAULTS.get("reserve_pool_enabled", False)))))
+    ledger_row["reserve_candidate_pool_n"] = int(risk_stats.get("reserve_candidate_pool_n", candidate_pool_n))
+    ledger_row["reserve_rounds_used"] = int(risk_stats.get("reserve_rounds_used", 0))
+    ledger_row["pre_optimizer_blocked_count"] = int(risk_stats.get("pre_optimizer_blocked_count", 0))
+    ledger_row["post_optimizer_blocked_count"] = int(risk_stats.get("post_optimizer_blocked_count", 0))
     ledger_row["risk_industry_limits_hit"] = int(risk_stats.get("industry_limits_hit", 0))
     ledger_row["risk_post_trade_industry_limits_hit"] = int(risk_stats.get("post_trade_industry_limits_hit", 0))
     ledger_row["risk_missing_industry_count"] = int(risk_stats.get("missing_industry_count", 0))
@@ -1099,6 +1229,7 @@ def main() -> int:
     ledger_row["risk_style_beta_limits_hit"] = int(risk_stats.get("style_beta_limits_hit", 0))
     ledger_row["risk_style_momentum_limits_hit"] = int(risk_stats.get("style_momentum_limits_hit", 0))
     ledger_row["risk_style_vol_limits_hit"] = int(risk_stats.get("style_vol_limits_hit", 0))
+    ledger_row["risk_entry_not_tradable_hit"] = int(risk_stats.get("entry_not_tradable_hit", 0))
     ledger_row["used_recommendation"] = int(bool(rec_info))
     ledger_row["recommend_rank"] = int(rec_info.get("recommend_rank", 0)) if rec_info else 0
     ledger_row["recommend_risk_tier"] = str(rec_info.get("risk_tier", "")) if rec_info else ""

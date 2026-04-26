@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from utils.code_utils import normalize_ts_code, normalize_ts_code_series
+from utils.code_utils import limit_ratio_for_stock, normalize_ts_code, normalize_ts_code_series
 from utils.portfolio_weights import build_score_weights
 
 
@@ -27,6 +27,8 @@ class PreTradeRiskConfig:
     max_style_vol_exposure_abs: float = 0.0
     style_lb_short: int = 20
     style_lb_beta: int = 60
+    max_names: int = 0
+    block_entry_not_tradable: bool = False
 
 
 UNKNOWN_INDUSTRY_LABEL = "未知"
@@ -68,6 +70,20 @@ def _clip_limit(limit: float) -> float:
     if np.isfinite(x) and x > 0:
         return float(x)
     return float("inf")
+
+
+def _is_locked_limit_up(row: pd.Series | None, code: str, name: str) -> bool:
+    if row is None:
+        return False
+    prev_close = _safe_float(row.get("prev_close", np.nan), np.nan)
+    op = _safe_float(row.get("open", np.nan), np.nan)
+    hi = _safe_float(row.get("high", np.nan), np.nan)
+    lo = _safe_float(row.get("low", np.nan), np.nan)
+    if (not np.isfinite(prev_close)) or prev_close <= 0:
+        return False
+    ratio = limit_ratio_for_stock(code, name)
+    limit_up = prev_close * (1.0 + abs(float(ratio)))
+    return (op >= limit_up * 0.999) and (hi >= limit_up * 0.999) and (lo >= limit_up * 0.999)
 
 
 def _zscore_map(raw_map: dict[str, float]) -> dict[str, float]:
@@ -344,9 +360,16 @@ def apply_pretrade_risk_gates(
             weights = pd.to_numeric(remaining["target_weight"], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
         else:
             scores = remaining["ML评分"].to_numpy(dtype=float)
-            weights = build_score_weights(scores, total_target=float(total_target_pos), single_cap=float(max_single_pos))
-            if len(weights) != len(remaining):
-                weights = np.zeros(len(remaining), dtype=float)
+            primary_count = int(cfg.max_names) if int(cfg.max_names) > 0 else len(remaining)
+            primary_count = max(0, min(primary_count, len(remaining)))
+            weights = np.zeros(len(remaining), dtype=float)
+            primary_weights = build_score_weights(
+                scores[:primary_count],
+                total_target=float(total_target_pos),
+                single_cap=float(max_single_pos),
+            )
+            if len(primary_weights) == primary_count:
+                weights[:primary_count] = primary_weights
         remaining = remaining.copy()
         remaining["risk_weight"] = weights
 
@@ -390,6 +413,8 @@ def apply_pretrade_risk_gates(
                     reasons.append("min_price")
                 if (not np.isfinite(amount)) or amount <= 0:
                     reasons.append("invalid_amount")
+                if bool(cfg.block_entry_not_tradable) and _is_locked_limit_up(bar, code, name):
+                    reasons.append("entry_not_tradable")
 
             if np.isfinite(amount) and amount > 0 and wt > 0 and cfg.capital_base > 0:
                 participation = float(cfg.capital_base * wt / amount)
@@ -512,6 +537,8 @@ def apply_pretrade_risk_gates(
         "style_beta_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_beta_exposure")).sum()) if not blocked_df.empty else 0,
         "style_momentum_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_momentum_exposure")).sum()) if not blocked_df.empty else 0,
         "style_vol_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_vol_exposure")).sum()) if not blocked_df.empty else 0,
+        "entry_not_tradable_hit": int((blocked_df["reasons"].astype(str).str.contains("entry_not_tradable")).sum()) if not blocked_df.empty else 0,
+        "max_names": int(cfg.max_names),
     }
     return kept_df.drop(columns=["risk_weight"], errors="ignore"), blocked_df, stats
 

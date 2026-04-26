@@ -4,6 +4,15 @@ Record recurring mistakes and failure modes. Keep this practical: symptom, cause
 
 ## Error Log
 
+### 2026-04-26 | Expanding candidate count without primary-topN semantics creates micro-position drift
+- tags: reserve_pool, optimizer, target_weight
+- status: active
+- severity: high
+- mitigation: Use `max_names` so the first topN receives initial score weights and reserve candidates start at zero, becoming active only through clip redistribution or pretrade replacement.
+- evidence: v8 reserve-pool implementation added `PortfolioConstraints.max_names` and pretrade `max_names`.
+
+Do not simply pass 4x candidates into score weighting; that turns reserve candidates into tiny active positions and hides the actual cash/replacement problem.
+
 ### 2026-04-26 | Promotion can pass strict gates over inconsistent target-weight evidence
 - tags: promotion, checksum, target_weight
 - status: active

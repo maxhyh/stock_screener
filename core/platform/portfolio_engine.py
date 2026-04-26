@@ -19,6 +19,7 @@ class PortfolioConstraints:
     capital_base: float = 1_000_000.0
     turnover_cap: float = 0.0
     min_names: int = 0
+    max_names: int = 0
     min_weight: float = 0.0
     score_col: str = "ML评分"
     code_col: str = "代码"
@@ -92,9 +93,12 @@ def build_portfolio_decision(
     df["_amount_for_capacity"] = _safe_num_series(df, constraints.amount_col, 0.0).clip(lower=0.0) * amount_buffer
     df = df.sort_values(score_col, ascending=False).drop_duplicates(subset=[code_col]).reset_index(drop=True)
 
-    weights = build_score_weights(df[score_col].to_numpy(dtype=float), total_target, single_cap)
-    if len(weights) != len(df):
-        weights = np.zeros(len(df), dtype=float)
+    primary_count = int(constraints.max_names) if int(constraints.max_names) > 0 else len(df)
+    primary_count = max(0, min(primary_count, len(df)))
+    weights = np.zeros(len(df), dtype=float)
+    primary_weights = build_score_weights(df[score_col].head(primary_count).to_numpy(dtype=float), total_target, single_cap)
+    if len(primary_weights) == primary_count:
+        weights[:primary_count] = primary_weights
     df["_raw_target_weight"] = weights
 
     min_weight = max(float(constraints.min_weight), 0.0)
@@ -253,6 +257,7 @@ def build_portfolio_decision(
             "industry_cap": float(industry_cap),
             "adv_participation_cap": float(adv_cap),
             "capital_base": float(capital_base),
+            "max_names": int(primary_count),
             "amount_col": str(constraints.amount_col),
             "amount_buffer": float(amount_buffer),
             "redistribute_clipped": bool(redistribute),

@@ -177,6 +177,12 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "entry_not_tradable_target_weight_sum": 0.0,
             "exit_not_tradable_target_weight_sum": 0.0,
             "max_daily_tradability_blocked_orders": 0.0,
+            "reserve_enabled_days": 0.0,
+            "reserve_candidate_pool_n_mean": 0.0,
+            "reserve_rounds_used_max": 0.0,
+            "pre_optimizer_blocked_count_sum": 0.0,
+            "post_optimizer_blocked_count_sum": 0.0,
+            "risk_entry_not_tradable_hit_sum": 0.0,
         }
     df = pd.read_csv(ledger_file)
     if df.empty:
@@ -203,6 +209,12 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "entry_not_tradable_target_weight_sum": 0.0,
             "exit_not_tradable_target_weight_sum": 0.0,
             "max_daily_tradability_blocked_orders": 0.0,
+            "reserve_enabled_days": 0.0,
+            "reserve_candidate_pool_n_mean": 0.0,
+            "reserve_rounds_used_max": 0.0,
+            "pre_optimizer_blocked_count_sum": 0.0,
+            "post_optimizer_blocked_count_sum": 0.0,
+            "risk_entry_not_tradable_hit_sum": 0.0,
         }
 
     for c in [
@@ -229,6 +241,12 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "blocked_target_weight",
         "entry_not_tradable_target_weight",
         "exit_not_tradable_target_weight",
+        "reserve_enabled",
+        "reserve_candidate_pool_n",
+        "reserve_rounds_used",
+        "pre_optimizer_blocked_count",
+        "post_optimizer_blocked_count",
+        "risk_entry_not_tradable_hit",
     ]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -295,6 +313,12 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "entry_not_tradable_target_weight_sum": float(df["entry_not_tradable_target_weight"].sum()),
         "exit_not_tradable_target_weight_sum": float(df["exit_not_tradable_target_weight"].sum()),
         "max_daily_tradability_blocked_orders": float(daily_tradability_blocked.max()) if len(df) else 0.0,
+        "reserve_enabled_days": float(df["reserve_enabled"].sum()),
+        "reserve_candidate_pool_n_mean": float(df["reserve_candidate_pool_n"].mean()) if len(df) else 0.0,
+        "reserve_rounds_used_max": float(df["reserve_rounds_used"].max()) if len(df) else 0.0,
+        "pre_optimizer_blocked_count_sum": float(df["pre_optimizer_blocked_count"].sum()),
+        "post_optimizer_blocked_count_sum": float(df["post_optimizer_blocked_count"].sum()),
+        "risk_entry_not_tradable_hit_sum": float(df["risk_entry_not_tradable_hit"].sum()),
     }
 
 
@@ -586,6 +610,12 @@ def main() -> int:
                         "entry_not_tradable_target_weight_sum": float(metrics.get("entry_not_tradable_target_weight_sum", 0.0)),
                         "exit_not_tradable_target_weight_sum": float(metrics.get("exit_not_tradable_target_weight_sum", 0.0)),
                         "max_daily_tradability_blocked_orders": float(metrics.get("max_daily_tradability_blocked_orders", 0.0)),
+                        "reserve_enabled_days": float(metrics.get("reserve_enabled_days", 0.0)),
+                        "reserve_candidate_pool_n_mean": float(metrics.get("reserve_candidate_pool_n_mean", 0.0)),
+                        "reserve_rounds_used_max": float(metrics.get("reserve_rounds_used_max", 0.0)),
+                        "pre_optimizer_blocked_count_sum": float(metrics.get("pre_optimizer_blocked_count_sum", 0.0)),
+                        "post_optimizer_blocked_count_sum": float(metrics.get("post_optimizer_blocked_count_sum", 0.0)),
+                        "risk_entry_not_tradable_hit_sum": float(metrics.get("risk_entry_not_tradable_hit_sum", 0.0)),
                         "objective_score": float(obj),
                     }
                 )

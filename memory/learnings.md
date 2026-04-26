@@ -4,6 +4,15 @@ Append durable research, execution, and governance learnings here. Keep entries 
 
 ## Learnings Log
 
+### 2026-04-26 | Reserve pool must enter before optimizer and P2 pretrade
+- tags: reserve_pool, p2, capacity, tradability
+- reusable: yes
+- confidence: high
+- evidence: Implemented `quality_regime_candidate_v8_reserve_pool`, `PortfolioConstraints.max_names`, daily reserve candidates, and P2 pretrade re-optimization.
+- action: Feed expanded candidate pools into portfolio/pretrade, but keep primary topN as the initial weight budget; reserve rows should receive weight only after capacity/tradability/industry clips.
+
+Reserve candidates cannot be appended only after execution. They must be visible before capacity clipping and before P2 pretrade so blocked buys and low-capacity names can be replaced instead of leaving cash.
+
 ### 2026-04-26 | Promotion needs target-weight source and checksum evidence
 - tags: promotion, checksum, target_weight, p2
 - reusable: yes

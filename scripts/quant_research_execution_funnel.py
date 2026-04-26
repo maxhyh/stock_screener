@@ -188,7 +188,7 @@ def main() -> int:
             "quality_regime,quality_regime_candidate,quality_regime_candidate_v2,"
             "quality_regime_candidate_v3,quality_regime_candidate_v4_exec,"
             "quality_regime_candidate_v5_capacity_guard,quality_regime_candidate_v6_liquidity_guard,"
-            "quality_regime_candidate_v7_industry_balance"
+            "quality_regime_candidate_v7_industry_balance,quality_regime_candidate_v8_reserve_pool"
         ),
         help="Profile names, comma separated",
     )

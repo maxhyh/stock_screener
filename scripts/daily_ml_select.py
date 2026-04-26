@@ -72,6 +72,36 @@ def _profile_float(profile_cfg: dict[str, object], key: str, default: float = 0.
         return float(default)
 
 
+def _profile_int(profile_cfg: dict[str, object] | None, key: str, default: int = 0) -> int:
+    try:
+        return int(float((profile_cfg or {}).get(key, default)))
+    except Exception:
+        return int(default)
+
+
+def _profile_bool(profile_cfg: dict[str, object] | None, key: str, default: bool = False) -> bool:
+    raw = (profile_cfg or {}).get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_candidate_pool_n(top_n: int, available_n: int, profile_cfg: dict[str, object] | None) -> int:
+    """Return the optimizer/pretrade candidate pool size for reserve replacement."""
+    top_n = max(1, int(top_n))
+    available_n = max(0, int(available_n))
+    if available_n <= 0:
+        return 0
+    cfg = profile_cfg or {}
+    multiplier = max(1.0, _profile_float(cfg, "optimizer_candidate_pool_multiplier", 1.0))
+    reserve_count = max(0, _profile_int(cfg, "reserve_candidate_count", 0))
+    pool_n = max(top_n, int(np.ceil(float(top_n) * multiplier)), top_n + reserve_count)
+    max_n = max(0, _profile_int(cfg, "optimizer_candidate_pool_max_n", 0))
+    if max_n > 0:
+        pool_n = min(pool_n, max(top_n, max_n))
+    return max(1, min(int(pool_n), available_n))
+
+
 def load_latest_model():
     """加载最新的训练模型"""
     if not os.path.exists(MODEL_DIR):
@@ -360,16 +390,39 @@ def _apply_signal_pretrade_gate(
     if max_single_pos <= 0:
         max_single_pos = 0.10
 
+    profile_pool_n = _resolve_candidate_pool_n(int(top_n), int(len(ranking_pool)), profile_cfg)
+    default_pool_mult = max(
+        1.0,
+        _profile_float(
+            profile_cfg or {},
+            "pretrade_candidate_pool_multiplier",
+            _profile_float(profile_cfg or {}, "optimizer_candidate_pool_multiplier", 1.0),
+        ),
+    )
+    default_pool_max_n = max(
+        int(top_n),
+        _profile_int(
+            profile_cfg,
+            "pretrade_candidate_pool_max_n",
+            _profile_int(profile_cfg, "optimizer_candidate_pool_max_n", profile_pool_n),
+        ),
+    )
+    default_allow_expand = _profile_bool(profile_cfg, "pretrade_allow_pool_expand", False) or _profile_bool(
+        profile_cfg,
+        "reserve_pool_enabled",
+        False,
+    )
     pool_fixed = int(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_N", "0"), 0.0))
-    pool_mult = min(max(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_MULT", "1.0"), 1.0), 1.0), 8.0)
-    pool_min_n = max(0, int(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_MIN_N", "0"), 0.0)))
+    pool_mult = min(max(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_MULT", str(default_pool_mult)), default_pool_mult), 1.0), 8.0)
+    pool_min_default = int(top_n) + max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))
+    pool_min_n = max(0, int(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_MIN_N", str(pool_min_default)), pool_min_default)))
     pool_step_n = max(1, int(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_STEP_N", "10"), 10.0)))
-    pool_max_n_default = max(int(top_n) * 3, int(top_n), pool_min_n)
+    pool_max_n_default = max(int(top_n) * 3, int(top_n), pool_min_n, default_pool_max_n)
     pool_max_n = max(1, int(_safe_float(os.environ.get("MFTS_SIGNAL_PRETRADE_POOL_MAX_N", str(pool_max_n_default)), pool_max_n_default)))
     pool_max_n = min(pool_max_n, int(len(ranking_pool)))
     allow_expand = _parse_bool_like(
-        os.environ.get("MFTS_SIGNAL_PRETRADE_ALLOW_EXPAND", "false"),
-        default=False,
+        os.environ.get("MFTS_SIGNAL_PRETRADE_ALLOW_EXPAND", str(default_allow_expand).lower()),
+        default=bool(default_allow_expand),
     )
     stress_block_rate_pct = max(
         0.0,
@@ -393,6 +446,7 @@ def _apply_signal_pretrade_gate(
     info["pretrade_uses_next_trade_day"] = int(bool(use_next_day))
 
     cfg = _build_signal_pretrade_cfg_from_env(profile_cfg)
+    cfg.max_names = int(top_n)
     eff_industry_map = industry_map if industry_map is not None else load_industry_map(data_dir)
 
     dynamic_pool_mult = float(pool_mult)
@@ -522,6 +576,7 @@ def _eval_topn_pretrade(
     )
     signal_df = signal_df[signal_df["代码"] != ""].copy()
     cfg = _build_signal_pretrade_cfg_from_env(profile_cfg)
+    cfg.max_names = int(len(signal_df))
     _, blocked_df, stats = apply_pretrade_risk_gates(
         signal_df=signal_df,
         bars_idx=bars_idx,
@@ -551,6 +606,7 @@ def _assign_target_weights(
     total_target_pos: float,
     max_single_pos: float,
     profile_cfg: dict[str, object],
+    primary_top_n: int | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     if top_stocks is None or top_stocks.empty:
         return top_stocks, {"mode": "empty", "selected_count": 0}
@@ -596,6 +652,8 @@ def _assign_target_weights(
             industry_cap=min(max(float(industry_cap), 0.0), 1.0),
             adv_participation_cap=min(max(float(adv_cap), 0.0), 1.0),
             capital_base=max(100000.0, _profile_float(profile_cfg, "target_capital_base", 1_000_000.0)),
+            max_names=max(0, int(primary_top_n or 0)),
+            min_names=max(0, _profile_int(profile_cfg, "min_valid_positions", 0)),
             score_col=ranking_col,
             code_col="ts_code",
             industry_col="industry",
@@ -627,10 +685,32 @@ def _assign_target_weights(
         fallback["unfilled_target_weight"] = 0.0
         fallback["industry_weight_post"] = 0.0
         fallback["constraint_reason"] = "optimizer_fallback"
-        return fallback, {"mode": optimizer_mode, "selected_count": int(len(fallback)), "fallback": True}
+        fallback["reserve_candidate"] = 0
+        return fallback, {
+            "mode": optimizer_mode,
+            "selected_count": int(len(fallback)),
+            "primary_top_n": int(primary_top_n or len(work)),
+            "candidate_pool_n": int(len(work)),
+            "fallback": True,
+        }
+    if _profile_bool(profile_cfg, "reserve_pool_enabled", False):
+        reserve_rows = pd.DataFrame(decision.diagnostics.get("blocked", []))
+        if not reserve_rows.empty and "constraint_reason" in reserve_rows.columns:
+            reserve_rows = reserve_rows[reserve_rows["constraint_reason"].astype(str).eq("zero_weight")].copy()
+            reserve_limit = max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))
+            if reserve_limit > 0:
+                reserve_rows = reserve_rows.head(reserve_limit).copy()
+        if not reserve_rows.empty:
+            selected["reserve_candidate"] = 0
+            reserve_rows["reserve_candidate"] = 1
+            selected = pd.concat([selected, reserve_rows.reindex(columns=selected.columns)], ignore_index=True)
+    if "reserve_candidate" not in selected.columns:
+        selected["reserve_candidate"] = 0
     return selected, {
         "mode": optimizer_mode,
         "selected_count": int(len(selected)),
+        "primary_top_n": int(primary_top_n or len(work)),
+        "candidate_pool_n": int(len(work)),
         "fallback": False,
         "exposures": decision.exposures,
         "diagnostics": decision.diagnostics,
@@ -930,9 +1010,10 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         data_dir=DATA_DIR,
     )
     
-    # 6. 排序并选择Top N
-    print(f"\n[5/5] 选择Top {regime_top_n}股票...")
-    top_stocks = ranking_pool.nlargest(regime_top_n, ranking_col).copy()
+    # 6. 排序并选择Top N；v8 reserve pool 会把扩展候选交给组合层，由组合层在 clip 后递补。
+    optimizer_pool_n = _resolve_candidate_pool_n(int(regime_top_n), int(len(ranking_pool)), profile_cfg)
+    print(f"\n[5/5] 选择Top {regime_top_n}目标股票 (optimizer_pool={optimizer_pool_n})...")
+    top_stocks = ranking_pool.nlargest(optimizer_pool_n, ranking_col).copy()
     target_total_for_weights = min(max(_parse_percent_text(regime.get("position_range", "60%-80%"), 0.60), 0.0), 1.0)
     target_single_for_weights = min(max(_parse_percent_text(regime.get("single_stock_max", "10%"), 0.10), 0.0), 1.0)
     top_stocks, optimizer_info = _assign_target_weights(
@@ -941,6 +1022,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         total_target_pos=target_total_for_weights,
         max_single_pos=target_single_for_weights,
         profile_cfg=profile_cfg,
+        primary_top_n=int(regime_top_n),
     )
     eval_trade_date = pd.to_datetime(signal_risk_info.get("trade_date", target_date), errors="coerce")
     if pd.isna(eval_trade_date):
@@ -968,13 +1050,13 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         'ts_code', 'name', 'close', 'pct_chg', 'ml_score', 'signal_quality', 'hybrid_score', 'stability_score', 'refactor_score',
         'liquidity_score', 'adv_capacity_score', 'industry_balance_score', 'amount_ma20', 'bias', 'z_score', 'rsi', 'vol_ratio',
         'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
-        'industry_weight_post', 'constraint_reason'
+        'industry_weight_post', 'constraint_reason', 'reserve_candidate'
     ]].copy()
     
     result.columns = ['代码', '名称', '收盘价', '涨跌幅%', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                       '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'BIAS-20', 'Z-Score', 'RSI', '量比',
                       'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
-                      'industry_weight_post', 'constraint_reason']
+                      'industry_weight_post', 'constraint_reason', 'reserve_candidate']
     result['代码'] = result['代码'].astype(str).str.zfill(6)
     
     result['日期'] = target_date.strftime('%Y-%m-%d')
@@ -999,7 +1081,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     result = result[['日期', '市场状态', '建议仓位', '单票上限', '建议持有天数', '排名', '代码', '名称', '收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                      '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'target_weight', 'target_weight_raw',
                      'participation_pct', 'impact_cost_bps', 'unfilled_target_weight', 'industry_weight_post',
-                     'constraint_reason', 'target_weight_source', 'target_weight_checksum',
+                     'constraint_reason', 'reserve_candidate', 'target_weight_source', 'target_weight_checksum',
                      'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']]
     
     # 保留两位小数
@@ -1034,6 +1116,9 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "raw_candidates": int(len(today_df)),
         "tradable_filtered": int(len(filtered_df)),
         "score_gated": int(len(gated_df)),
+        "optimizer_candidate_pool_n": int(optimizer_pool_n),
+        "optimizer_primary_top_n": int(regime_top_n),
+        "reserve_candidate_count": int(max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))),
         "liquidity_stage": str(liquidity_stage),
         "liquidity_blend": float(liquidity_blend),
         "adv_penalty_blend": float(adv_penalty_blend),
@@ -1086,7 +1171,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     )
 
     print("\n" + "=" * 70)
-    print(f"Top {regime_top_n} 推荐股票")
+    print(f"Top {regime_top_n} 目标股票 / reserve 后实际 {len(result)} 只")
     print("=" * 70)
     print(result.to_string(index=False))
     

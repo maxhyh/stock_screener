@@ -44,9 +44,10 @@ Generated outputs in `output/`, logs in `logs/`, trained model binaries in `mode
 
 - Current default profile: `quality_regime`.
 - v7 shadow profile: `quality_regime_candidate_v7_industry_balance`.
+- v8 shadow profile: `quality_regime_candidate_v8_reserve_pool`.
 - v7 direction is judged correct on industry concentration, but it has not yet delivered enough execution-layer NAV improvement.
 - v7 should not be promoted now.
-- v8 direction should focus on execution repair, not looser risk controls.
+- v8 implements reserve-pool execution repair: expanded candidates, capacity-clip redistribution, and P2 pretrade replacement for buy-side tradability/ADV/industry blocks. It is not promoted by default.
 
 ## 5. Latest v7 Evidence Summary
 
@@ -73,6 +74,7 @@ The next review should be especially strict on these points:
 4. Late-March blocked orders expose an execution break around T+1 tradability, limit-up/limit-down, and suspension behavior.
 5. Industry concentration has improved, but effective deployed capital and post-execution NAV still need proof.
 6. Profile promotion must reject candidates that win only by holding excess cash or benefiting from incomplete execution modeling.
+7. v8 reserve-pool evidence still needs fresh 60/90/120 P2 replay before any promotion discussion.
 
 ## 7. What Expert Review Should Decide
 
@@ -84,4 +86,3 @@ The review should answer:
 - Is the portfolio engine mature enough, or should the objective function be made more explicit?
 - Are the promotion gates hard enough for real A-share constraints?
 - Should v8 focus on reserve candidates, redistribution after capacity clips, and tradability-block repair before any alpha tuning?
-
