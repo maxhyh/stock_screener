@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+
+# Local editor/runtime noise
+.vscode/
+.idea/
+
+# Runtime logs and generated artifacts
+logs/
+output/
+
+# Large or generated market data
+data/*.parquet
+data/*.csv
+data/**/*.parquet
+data/**/*.csv
+data/**/__pycache__/
+
+# Trained model binaries are generated locally and can be large.
+models/*.pkl
+models/**/*.pkl
+
+# Local environment files
+.env
+.env.*

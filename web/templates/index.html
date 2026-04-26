@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 总览驾驶舱{% endblock %}
+{% block page_kicker %}Trading Command Center{% endblock %}
+{% block page_title %}A 股量化驾驶舱{% endblock %}
+{% block page_subtitle %}把研究、回测、执行和平台运行态放在同一视角下。首页优先回答三件事：数据能不能信、今天该不该出手、历史上这套流程表现如何。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <select id="tradeDate" class="control"></select>
+        <button id="refreshBtn" class="button">刷新驾驶舱</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Today Decision</div>
+                <h2 id="heroTitle">正在读取平台运行态与今日决策...</h2>
+                <p class="hero-copy" id="heroCopy">系统会同时汇总数据覆盖、市场状态、推荐数量、执行记录、权益曲线和实验注册信息。</p>
+                <div class="chip-row" id="heroChips"></div>
+            </div>
+            <div class="hero-metrics" id="heroMetrics">
+                <div class="glass-card">
+                    <div class="status-title">今日推荐</div>
+                    <div class="status-value">--</div>
+                </div>
+                <div class="glass-card">
+                    <div class="status-title">数据覆盖</div>
+                    <div class="status-value">--</div>
+                </div>
+                <div class="glass-card">
+                    <div class="status-title">平台运行</div>
+                    <div class="status-value">--</div>
+                </div>
+                <div class="glass-card">
+                    <div class="status-title">回测年化</div>
+                    <div class="status-value">--</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="status-grid" id="statusGrid">
+        <div class="status-card"><div class="status-title">数据日期</div><div class="status-value">--</div></div>
+        <div class="status-card"><div class="status-title">最新 Run</div><div class="status-value">--</div></div>
+        <div class="status-card"><div class="status-title">平台健康</div><div class="status-value">--</div></div>
+        <div class="status-card"><div class="status-title">实验注册</div><div class="status-value">--</div></div>
+    </section>
+
+    <section class="metric-grid" id="metricGrid">
+        <article class="metric-card"><div class="metric-label">建议仓位</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">单票上限</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">历史验证胜率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">验证平均收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">回测年化</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">最大回撤</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">Sharpe</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">最近权益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Portfolio Path</div>
+                    <h3 class="panel-title">组合权益曲线</h3>
+                    <p class="panel-copy">最近阶段的组合净值变化，用来快速判断当前系统是否处于顺风或回撤区间。</p>
+                </div>
+            </div>
+            <div id="equityChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Verification Trend</div>
+                    <h3 class="panel-title">历史验证表现</h3>
+                    <p class="panel-copy">把日度整体胜率、平均收益和 Top10 胜率放在同一时间轴里看研究质量是否稳定。</p>
+                </div>
+            </div>
+            <div id="verificationChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="table-layout">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Daily Book</div>
+                    <h3 class="panel-title">今日推荐清单</h3>
+                    <p class="panel-copy">点击股票代码可查看最近 180 天价格路径与关联交易记录。</p>
+                </div>
+                <div class="table-meta" id="dailyMeta">Top 20</div>
+            </div>
+            <div id="dailyTable"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Signal Inventory</div>
+                    <h3 class="panel-title">规则扫描信号</h3>
+                    <p class="panel-copy">用于观察今日规则侧 alpha 库的广度与结构，不直接等同于最终执行组合。</p>
+                </div>
+                <div class="table-meta" id="scanMeta">Top 20</div>
+            </div>
+            <div id="scanTable"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Execution Ledger</div>
+                    <h3 class="panel-title">最近交易流水</h3>
+                    <p class="panel-copy">这里关注真实执行层面的组合暴露、收益和持仓分布，而不是只看选股结果。</p>
+                </div>
+                <div class="table-meta">最近 50 笔</div>
+            </div>
+            <div id="tradeTable"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Return Structure</div>
+                    <h3 class="panel-title">月度收益钻取</h3>
+                    <p class="panel-copy">按月拆开组合回报，方便识别“少数月份抬高年化”还是“稳定贡献”。</p>
+                </div>
+            </div>
+            <div id="monthlyReturnChart" class="chart-surface compact"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Optimization Frontier</div>
+                    <h3 class="panel-title">参数候选与硬门槛</h3>
+                    <p class="panel-copy">这里优先展示通过硬门槛的方案，避免被高收益但不可执行的参数误导。</p>
+                </div>
+                <div class="table-meta">Top 5</div>
+            </div>
+            <div id="optimizeTable"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Platform Ops</div>
+                    <h3 class="panel-title">平台运行态</h3>
+                    <p class="panel-copy">把最新运行、实验注册和健康状态独立出来，避免和交易信息混在一起。</p>
+                </div>
+            </div>
+            <div id="opsPanel"></div>
+        </article>
+    </section>
+
+    <div class="footer-note">
+        首页主数据来自 <span class="mono">/api/platform/overview</span>，运行态来自 <span class="mono">/api/platform/health</span>、<span class="mono">/api/platform/latest_run</span> 与 <span class="mono">/api/platform/experiments</span>。
+    </div>
+
+    <div id="stockModal" class="modal">
+        <div class="modal-card">
+            <div class="split-header">
+                <div>
+                    <div class="section-kicker">Instrument Drilldown</div>
+                    <h3 id="stockTitle" class="panel-title">股票详情</h3>
+                    <p id="stockSubtitle" class="panel-copy">最近 180 天价格走势与关联交易记录。</p>
+                </div>
+                <button id="closeModal" class="modal-close" aria-label="关闭">×</button>
+            </div>
+            <div class="detail-grid">
+                <div class="panel">
+                    <div id="stockChart" class="chart-surface tall"></div>
+                </div>
+                <div class="list-stack">
+                    <div class="panel">
+                        <div class="panel-head">
+                            <div class="panel-title-wrap">
+                                <div class="panel-label">Snapshot</div>
+                                <h4 class="panel-title">最新行情快照</h4>
+                            </div>
+                        </div>
+                        <div id="stockSnapshot"></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head">
+                            <div class="panel-title-wrap">
+                                <div class="panel-label">Related Trades</div>
+                                <h4 class="panel-title">关联交易记录</h4>
+                            </div>
+                        </div>
+                        <div id="stockTrades"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/index.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}MFTS Quant Platform{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='platform.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.4.3/echarts.min.js"></script>
+    <script defer src="{{ url_for('static', filename='platform.js') }}"></script>
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <div class="platform-shell">
+        <aside class="platform-sidebar">
+            <a class="brand-lockup" href="/">
+                <span class="brand-mark">M</span>
+                <div>
+                    <div class="brand-kicker">A-Share Quant</div>
+                    <div class="brand-name">MFTS Platform</div>
+                </div>
+            </a>
+
+            <nav class="nav-cluster">
+                <a href="/" class="nav-link {% if request.path == '/' or request.path == '/scanner' %}active{% endif %}">
+                    <span class="nav-icon">01</span>
+                    <span>总览驾驶舱</span>
+                </a>
+                <a href="/ml" class="nav-link {% if request.path.startswith('/ml') and request.path != '/ml/history' %}active{% endif %}">
+                    <span class="nav-icon">02</span>
+                    <span>今日推荐</span>
+                </a>
+                <a href="/ml/history" class="nav-link {% if request.path == '/ml/history' %}active{% endif %}">
+                    <span class="nav-icon">03</span>
+                    <span>历史验证</span>
+                </a>
+                <a href="/backtest" class="nav-link {% if request.path == '/backtest' %}active{% endif %}">
+                    <span class="nav-icon">04</span>
+                    <span>回测研究</span>
+                </a>
+                <a href="/signal-analysis" class="nav-link {% if request.path == '/signal-analysis' %}active{% endif %}">
+                    <span class="nav-icon">05</span>
+                    <span>信号剖析</span>
+                </a>
+                <a href="/platform/ops" class="nav-link {% if request.path == '/platform/ops' %}active{% endif %}">
+                    <span class="nav-icon">06</span>
+                    <span>平台运维</span>
+                </a>
+            </nav>
+
+            <section class="sidebar-panel">
+                <div class="sidebar-label">Platform Focus</div>
+                <ul class="sidebar-list">
+                    <li>研究、回测、执行共用一套数据口径</li>
+                    <li>优先展示可执行性、风控和数据健康</li>
+                    <li>非实盘阶段聚焦复现、审计和研究闭环</li>
+                </ul>
+            </section>
+        </aside>
+
+        <div class="platform-main">
+            <header class="platform-topbar">
+                <div>
+                    <div class="page-kicker">{% block page_kicker %}Quant Control{% endblock %}</div>
+                    <h1 class="page-title">{% block page_title %}MFTS Platform{% endblock %}</h1>
+                    <p class="page-subtitle">{% block page_subtitle %}{% endblock %}</p>
+                </div>
+                <div class="topbar-actions">
+                    {% block page_actions %}{% endblock %}
+                </div>
+            </header>
+
+            <main class="page-body">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+    {% block page_scripts %}{% endblock %}
+</body>
+</html>

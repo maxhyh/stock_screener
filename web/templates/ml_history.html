@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 历史验证{% endblock %}
+{% block page_kicker %}Validation Research{% endblock %}
+{% block page_title %}历史验证研究页{% endblock %}
+{% block page_subtitle %}这里不看“今天买什么”，而是看这套日选股在过去一段时间里是否稳定有效，是否存在只靠少量窗口撑起表现的问题。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <button id="reloadHistory" class="button">刷新验证</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Validation Summary</div>
+                <h2 id="historyHeroTitle">正在加载历史验证数据...</h2>
+                <p id="historyHeroCopy" class="hero-copy">这页会把多日验证汇总成趋势视图，帮助判断模型在不同市场阶段里的稳定性。</p>
+                <div id="historyHeroChips" class="chip-row"></div>
+            </div>
+            <div id="historyHeroMetrics" class="hero-metrics">
+                <div class="glass-card"><div class="status-title">验证天数</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+1 胜率</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+5 胜率</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+10 胜率</div><div class="status-value">--</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="metric-grid" id="historyMetricGrid">
+        <article class="metric-card"><div class="metric-label">验证天数</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+1 胜率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+5 胜率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+10 胜率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Win Rate Regime</div>
+                    <h3 class="panel-title">多窗口胜率趋势</h3>
+                    <p class="panel-copy">把 T+1、T+5、T+10 胜率并列，能快速识别策略是偏短线有效还是需要更长持有周期。</p>
+                </div>
+            </div>
+            <div id="historyWinChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Return Quality</div>
+                    <h3 class="panel-title">平均收益结构</h3>
+                    <p class="panel-copy">若平均收益长期弱于胜率，往往意味着盈亏比不足；反过来则要检查是否依赖少数大牛股。</p>
+                </div>
+            </div>
+            <div id="historyReturnChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Validation Log</div>
+                <h3 class="panel-title">验证日明细</h3>
+                <p class="panel-copy">点击某个验证日可查看更细的扩展验证记录，支持回溯当时的收益分布。</p>
+            </div>
+            <div class="table-meta" id="historyTableMeta">--</div>
+        </div>
+        <div id="historyTable"></div>
+    </section>
+
+    <div id="detailModal" class="modal">
+        <div class="modal-card">
+            <div class="split-header">
+                <div>
+                    <div class="section-kicker">Validation Detail</div>
+                    <h3 id="detailTitle" class="panel-title">验证日详情</h3>
+                    <p id="detailSubtitle" class="panel-copy">展开单日扩展验证记录。</p>
+                </div>
+                <button id="closeDetailModal" class="modal-close" aria-label="关闭">×</button>
+            </div>
+            <div id="detailTableContainer"></div>
+        </div>
+    </div>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/ml_history.js') }}"></script>
+{% endblock %}

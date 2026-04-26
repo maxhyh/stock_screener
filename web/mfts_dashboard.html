@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MFTS 智能选股系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: rgba(25, 25, 35, 0.8);
+            --bg-card-hover: rgba(35, 35, 50, 0.9);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0b0;
+            --text-muted: #606070;
+            --accent-red: #ff4757;
+            --accent-orange: #ffa502;
+            --accent-green: #2ed573;
+            --accent-blue: #3742fa;
+            --accent-purple: #8b5cf6;
+            --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-red: linear-gradient(135deg, #ff4757 0%, #ff6b81 100%);
+            --gradient-green: linear-gradient(135deg, #2ed573 0%, #7bed9f 100%);
+            --gradient-orange: linear-gradient(135deg, #ffa502 0%, #ff7f50 100%);
+            --gradient-blue: linear-gradient(135deg, #3742fa 0%, #5f6cff 100%);
+            --shadow-glow: 0 0 40px rgba(139, 92, 246, 0.15);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(139, 92, 246, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(55, 66, 250, 0.08) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--gradient-primary);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .logo h1 {
+            font-size: 28px;
+            font-weight: 700;
+            background: var(--gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .logo-subtitle {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .date-display {
+            background: var(--bg-card);
+            padding: 12px 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            backdrop-filter: blur(10px);
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border-radius: 12px;
+            border: none;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--gradient-primary);
+            color: white;
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.4);
+        }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            border-radius: 16px 16px 0 0;
+        }
+
+        .stat-card.total::before {
+            background: var(--gradient-primary);
+        }
+
+        .stat-card.extreme::before {
+            background: var(--gradient-red);
+        }
+
+        .stat-card.deep::before {
+            background: var(--gradient-orange);
+        }
+
+        .stat-card.rate::before {
+            background: var(--gradient-green);
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 36px;
+            font-weight: 700;
+        }
+
+        .stat-card.total .stat-value {
+            color: var(--accent-purple);
+        }
+
+        .stat-card.extreme .stat-value {
+            color: var(--accent-red);
+        }
+
+        .stat-card.deep .stat-value {
+            color: var(--accent-orange);
+        }
+
+        .stat-card.rate .stat-value {
+            color: var(--accent-green);
+        }
+
+        .stat-change {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 24px;
+        }
+
+        .sidebar {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+            height: fit-content;
+        }
+
+        .sidebar-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        .filter-group {
+            margin-bottom: 24px;
+        }
+
+        .filter-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .filter-options {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .filter-option {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .filter-option:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .filter-option.active {
+            border-color: var(--accent-purple);
+            background: rgba(139, 92, 246, 0.1);
+        }
+
+        .filter-checkbox {
+            width: 18px;
+            height: 18px;
+            border: 2px solid var(--border-color);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .filter-option.active .filter-checkbox {
+            background: var(--accent-purple);
+            border-color: var(--accent-purple);
+        }
+
+        .filter-option.active .filter-checkbox::after {
+            content: '✓';
+            color: white;
+            font-size: 12px;
+        }
+
+        .filter-count {
+            margin-left: auto;
+            background: var(--bg-primary);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            overflow: hidden;
+            backdrop-filter: blur(10px);
+        }
+
+        .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .table-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--bg-secondary);
+            padding: 10px 16px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+        }
+
+        .search-box input {
+            background: none;
+            border: none;
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+            width: 200px;
+        }
+
+        .search-box input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .file-upload {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            padding: 40px;
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            margin: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-upload:hover {
+            border-color: var(--accent-purple);
+            background: rgba(139, 92, 246, 0.05);
+        }
+
+        .file-upload .icon {
+            font-size: 48px;
+        }
+
+        .file-upload input {
+            display: none;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            padding: 16px 20px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+        }
+
+        td {
+            padding: 16px 20px;
+            font-size: 14px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        tr:hover td {
+            background: var(--bg-card-hover);
+        }
+
+        .stock-code {
+            font-weight: 600;
+            color: var(--accent-purple);
+        }
+
+        .signal-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            gap: 6px;
+        }
+
+        .signal-l1 {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+        }
+
+        .signal-l2 {
+            background: rgba(255, 165, 2, 0.15);
+            color: var(--accent-orange);
+            border: 1px solid rgba(255, 165, 2, 0.3);
+        }
+
+        .signal-l3 {
+            background: rgba(139, 92, 246, 0.15);
+            color: var(--accent-purple);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+
+        .signal-trend {
+            background: rgba(55, 66, 250, 0.15);
+            color: #5f6cff;
+            border: 1px solid rgba(55, 66, 250, 0.3);
+        }
+
+        .price-up {
+            color: var(--accent-red);
+        }
+
+        .price-down {
+            color: var(--accent-green);
+        }
+
+        .level-badge {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .level-extreme {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--accent-red);
+        }
+
+        .level-deep {
+            background: rgba(255, 165, 2, 0.15);
+            color: var(--accent-orange);
+        }
+
+        .level-normal {
+            background: rgba(160, 160, 176, 0.15);
+            color: var(--text-secondary);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 16px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">📊</div>
+                <div>
+                    <h1>MFTS 智能选股系统</h1>
+                    <div class="logo-subtitle">Multi-Factor Timing System v6.1</div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="date-display">
+                    <span>📅</span>
+                    <span class="date" id="currentDate">--</span>
+                </div>
+                <button class="btn btn-secondary" onclick="document.getElementById('csvFile').click()">
+                    📂 加载 CSV
+                </button>
+            </div>
+        </header>
+
+        <div class="stats-grid">
+            <div class="stat-card total">
+                <div class="stat-label">📈 今日选股</div>
+                <div class="stat-value" id="statTotal">--</div>
+                <div class="stat-change">符合条件标的</div>
+            </div>
+            <div class="stat-card extreme">
+                <div class="stat-label">🔥 极度超跌</div>
+                <div class="stat-value" id="statExtreme">--</div>
+                <div class="stat-change">BIAS < -15%</div>
+                </div>
+                <div class="stat-card deep">
+                    <div class="stat-label">⚠️ 深度超跌</div>
+                    <div class="stat-value" id="statDeep">--</div>
+                    <div class="stat-change">BIAS < -10%</div>
+                    </div>
+                    <div class="stat-card rate">
+                        <div class="stat-label">🔵 趋势信号</div>
+                        <div class="stat-value" id="statTrend">--</div>
+                        <div class="stat-change">突破/动量</div>
+                    </div>
+                </div>
+
+                <div class="main-content">
+                    <aside class="sidebar">
+                        <div class="sidebar-title">🔍 筛选条件</div>
+
+                        <div class="filter-group">
+                            <div class="filter-label">信号类型</div>
+                            <div class="filter-options" id="signalFilters">
+                                <label class="filter-option active" data-filter="all">
+                                    <div class="filter-checkbox"></div>
+                                    <span>全部信号</span>
+                                    <span class="filter-count" id="countAll">0</span>
+                                </label>
+                                <label class="filter-option" data-filter="l1">
+                                    <div class="filter-checkbox"></div>
+                                    <span>🔴 抢筹 L1</span>
+                                    <span class="filter-count" id="countL1">0</span>
+                                </label>
+                                <label class="filter-option" data-filter="l2">
+                                    <div class="filter-checkbox"></div>
+                                    <span>🟠 建仓 L2</span>
+                                    <span class="filter-count" id="countL2">0</span>
+                                </label>
+                                <label class="filter-option" data-filter="l3">
+                                    <div class="filter-checkbox"></div>
+                                    <span>🟣 加仓 L3</span>
+                                    <span class="filter-count" id="countL3">0</span>
+                                </label>
+                                <label class="filter-option" data-filter="trend">
+                                    <div class="filter-checkbox"></div>
+                                    <span>🔵 趋势信号</span>
+                                    <span class="filter-count" id="countTrend">0</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="filter-group">
+                            <div class="filter-label">超跌等级</div>
+                            <div class="filter-options" id="levelFilters">
+                                <label class="filter-option active" data-level="all">
+                                    <div class="filter-checkbox"></div>
+                                    <span>全部等级</span>
+                                </label>
+                                <label class="filter-option" data-level="极度">
+                                    <div class="filter-checkbox"></div>
+                                    <span>🔥 极度</span>
+                                </label>
+                                <label class="filter-option" data-level="深度">
+                                    <div class="filter-checkbox"></div>
+                                    <span>⚠️ 深度</span>
+                                </label>
+                                <label class="filter-option" data-level="普通">
+                                    <div class="filter-checkbox"></div>
+                                    <span>📊 普通</span>
+                                </label>
+                            </div>
+                        </div>
+                    </aside>
+
+                    <div class="table-container">
+                        <div class="table-header">
+                            <div class="table-title">选股结果</div>
+                            <div class="search-box">
+                                <span>🔍</span>
+                                <input type="text" id="searchInput" placeholder="搜索代码或名称..." oninput="filterTable()">
+                            </div>
+                        </div>
+                        <div id="tableContent">
+                            <label class="file-upload" for="csvFile">
+                                <div class="icon">📂</div>
+                                <div>点击或拖拽上传 <strong>mfts_v6.1_scan_result.csv</strong></div>
+                                <div style="color: var(--text-muted); font-size: 12px;">选股结果文件</div>
+                            </label>
+                            <input type="file" id="csvFile" accept=".csv" onchange="loadCSV(event)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <script>
+                let allData = [];
+                let currentFilter = { signal: 'all', level: 'all' };
+
+                document.addEventListener('DOMContentLoaded', () => {
+                    document.getElementById('currentDate').textContent = new Date().toLocaleDateString('zh-CN');
+                    setupFilters();
+                });
+
+                function loadCSV(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    const reader = new FileReader();
+                    reader.onload = function (e) {
+                        const text = e.target.result;
+                        parseCSV(text);
+                    };
+                    reader.readAsText(file, 'utf-8');
+                }
+
+                function parseCSV(text) {
+                    const lines = text.trim().split('\n');
+                    const headers = lines[0].split(',');
+
+                    allData = lines.slice(1).map(line => {
+                        const values = line.split(',');
+                        const row = {};
+                        headers.forEach((h, i) => {
+                            row[h.trim()] = values[i]?.trim() || '';
+                        });
+                        return row;
+                    });
+
+                    updateStats();
+                    updateCounts();
+                    renderTable(allData);
+                }
+
+                function updateStats() {
+                    document.getElementById('statTotal').textContent = allData.length;
+                    document.getElementById('statExtreme').textContent = allData.filter(r => r['超跌等级'] === '极度').length;
+                    document.getElementById('statDeep').textContent = allData.filter(r => r['超跌等级'] === '深度').length;
+                    document.getElementById('statTrend').textContent = allData.filter(r => r['信号']?.includes('趋势')).length;
+                }
+
+                function updateCounts() {
+                    document.getElementById('countAll').textContent = allData.length;
+                    document.getElementById('countL1').textContent = allData.filter(r => r['信号']?.includes('抢筹')).length;
+                    document.getElementById('countL2').textContent = allData.filter(r => r['信号']?.includes('建仓')).length;
+                    document.getElementById('countL3').textContent = allData.filter(r => r['信号']?.includes('加仓')).length;
+                    document.getElementById('countTrend').textContent = allData.filter(r => r['信号']?.includes('趋势')).length;
+                }
+
+                function setupFilters() {
+                    document.querySelectorAll('#signalFilters .filter-option').forEach(opt => {
+                        opt.addEventListener('click', () => {
+                            document.querySelectorAll('#signalFilters .filter-option').forEach(o => o.classList.remove('active'));
+                            opt.classList.add('active');
+                            currentFilter.signal = opt.dataset.filter;
+                            filterTable();
+                        });
+                    });
+
+                    document.querySelectorAll('#levelFilters .filter-option').forEach(opt => {
+                        opt.addEventListener('click', () => {
+                            document.querySelectorAll('#levelFilters .filter-option').forEach(o => o.classList.remove('active'));
+                            opt.classList.add('active');
+                            currentFilter.level = opt.dataset.level;
+                            filterTable();
+                        });
+                    });
+                }
+
+                function filterTable() {
+                    const searchText = document.getElementById('searchInput').value.toLowerCase();
+
+                    let filtered = allData.filter(item => {
+                        const matchSearch = !searchText ||
+                            item['代码']?.toLowerCase().includes(searchText) ||
+                            item['名称']?.toLowerCase().includes(searchText);
+
+                        let matchSignal = currentFilter.signal === 'all';
+                        if (currentFilter.signal === 'l1') matchSignal = item['信号']?.includes('抢筹');
+                        if (currentFilter.signal === 'l2') matchSignal = item['信号']?.includes('建仓');
+                        if (currentFilter.signal === 'l3') matchSignal = item['信号']?.includes('加仓');
+                        if (currentFilter.signal === 'trend') matchSignal = item['信号']?.includes('趋势');
+
+                        const matchLevel = currentFilter.level === 'all' || item['超跌等级'] === currentFilter.level;
+
+                        return matchSearch && matchSignal && matchLevel;
+                    });
+
+                    renderTable(filtered);
+                }
+
+                function renderTable(data) {
+                    if (!data || data.length === 0) {
+                        document.getElementById('tableContent').innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">📭</div>
+                        <p>暂无符合条件的数据</p>
+                    </div>
+                `;
+                        return;
+                    }
+
+                    let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>代码</th>
+                            <th>名称</th>
+                            <th>信号</th>
+                            <th>涨幅%</th>
+                            <th>Alpha</th>
+                            <th>Z-Score</th>
+                            <th>BIAS%</th>
+                            <th>Vol比</th>
+                            <th>超跌等级</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+                    data.forEach(item => {
+                        const pctChange = parseFloat(item['涨幅%']) || 0;
+                        const pctClass = pctChange >= 0 ? 'price-up' : 'price-down';
+
+                        let signalBadge = '';
+                        const signal = item['信号'] || '';
+                        if (signal.includes('抢筹')) signalBadge = '<span class="signal-badge signal-l1">🔴 抢筹 L1</span>';
+                        else if (signal.includes('建仓')) signalBadge = '<span class="signal-badge signal-l2">🟠 建仓 L2</span>';
+                        else if (signal.includes('加仓')) signalBadge = '<span class="signal-badge signal-l3">🟣 加仓 L3</span>';
+                        else if (signal.includes('趋势')) signalBadge = '<span class="signal-badge signal-trend">🔵 ' + signal + '</span>';
+
+                        let levelBadge = '';
+                        const level = item['超跌等级'] || '普通';
+                        if (level === '极度') levelBadge = '<span class="level-badge level-extreme">极度</span>';
+                        else if (level === '深度') levelBadge = '<span class="level-badge level-deep">深度</span>';
+                        else levelBadge = '<span class="level-badge level-normal">普通</span>';
+
+                        html += `
+                    <tr>
+                        <td><span class="stock-code">${item['代码'] || ''}</span></td>
+                        <td>${item['名称'] || ''}</td>
+                        <td>${signalBadge}</td>
+                        <td class="${pctClass}">${pctChange >= 0 ? '+' : ''}${pctChange.toFixed(2)}%</td>
+                        <td>${item['Alpha评分'] || '-'}</td>
+                        <td>${item['Z-Score'] || '-'}</td>
+                        <td>${item['BIAS'] || '-'}%</td>
+                        <td>${item['Vol比'] || '-'}</td>
+                        <td>${levelBadge}</td>
+                    </tr>
+                `;
+                    });
+
+                    html += '</tbody></table>';
+                    document.getElementById('tableContent').innerHTML = html;
+                }
+            </script>
+</body>
+
+</html>

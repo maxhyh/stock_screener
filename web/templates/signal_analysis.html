@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 信号剖析{% endblock %}
+{% block page_kicker %}Signal Research{% endblock %}
+{% block page_title %}信号绩效剖析{% endblock %}
+{% block page_subtitle %}这页是规则信号的研究工作台，重点比较不同信号类型、不同超跌等级在多持有周期下的收益与胜率结构。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <select id="periodSelect" class="control">
+            <option value="1">最近 1 个月</option>
+            <option value="3">最近 3 个月</option>
+            <option value="6" selected>最近 6 个月</option>
+            <option value="all">全部数据</option>
+        </select>
+        <button id="reloadSignal" class="button">重新分析</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Signal Regime</div>
+                <h2 id="signalHeroTitle">正在加载信号统计...</h2>
+                <p id="signalHeroCopy" class="hero-copy">把规则信号拆开看，才能区分“哪些信号真的有 edge”，以及“哪些只是跟着市场波动一起涨跌”。</p>
+                <div id="signalHeroChips" class="chip-row"></div>
+            </div>
+            <div id="signalHeroMetrics" class="hero-metrics">
+                <div class="glass-card"><div class="status-title">样本总数</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+1 收益</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+1 胜率</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+5 胜率</div><div class="status-value">--</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="metric-grid" id="signalMetricGrid">
+        <article class="metric-card"><div class="metric-label">样本总数</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+1 收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+5 收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">时间范围</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Monthly Regime</div>
+                    <h3 class="panel-title">月度趋势</h3>
+                    <p class="panel-copy">看信号绩效是否稳定，最直接的办法就是按月拆开，避免被全周期平均值掩盖掉回撤段。</p>
+                </div>
+            </div>
+            <div id="signalMonthlyChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Type Comparison</div>
+                    <h3 class="panel-title">按信号类型对比</h3>
+                    <p class="panel-copy">如果某个信号类型长期拖累收益，就应该从信号库中降权甚至移除，而不是默认保留。</p>
+                </div>
+            </div>
+            <div id="signalTypeChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Signal Type Table</div>
+                    <h3 class="panel-title">信号类型明细</h3>
+                    <p class="panel-copy">重点比较样本数、T+1/T+5 收益与胜率，防止在小样本上过度解读。</p>
+                </div>
+                <div class="table-meta">按信号类型</div>
+            </div>
+            <div id="signalTypeTable"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Oversold Levels</div>
+                    <h3 class="panel-title">超跌等级明细</h3>
+                    <p class="panel-copy">用于识别“越跌越买”到底是 edge，还是只是承担了更多尾部波动。</p>
+                </div>
+                <div class="table-meta">按超跌等级</div>
+            </div>
+            <div id="signalLevelTable"></div>
+        </article>
+    </section>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/signal_analysis.js') }}"></script>
+{% endblock %}

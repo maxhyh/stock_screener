@@ -1,0 +1,1494 @@
+//@version=6
+// ==========================================
+// MFTS v6.1_fix3 多因子量价卖出修复版
+// ==========================================
+// [版本更新]: v6.1_fix3 - 修复高抛误触发问题
+// [核心改进]:
+//   1. 新增动量因子（mom_5 IC=-0.075最强，mom_20 IC=-0.066权重27.5%）
+//   2. 恢复RSI因子（IC=-0.056，大样本验证有效）
+//   3. 恢复52周位置（IC=-0.034，大样本验证有效）
+//   4. 量价相关性优化（pv_corr_5 IC=-0.060，pv_corr_20 IC=-0.056）
+//   5. BIAS20/13 IC=-0.070，保持高权重
+// [数据验证]: 全A股3805只 / 2005-2020 / 763万样本 / LightGBM IC=0.037
+// [执行纪律]: 请严格遵守 14:45 尾盘确认原则
+// ==========================================
+
+indicator("MFTS v6.1_fix3", shorttitle="MFTS_fix3", overlay=true, max_bars_back=500, format=format.inherit)
+
+// ==========================================
+// 1. 参数设置
+// ==========================================
+grp_mode    = "⚔️ 战术指挥室"
+enable_auto_mode = input.bool(true, "启用模式自动切换", tooltip="根据趋势强度自动切换策略逻辑", group=grp_mode)
+strat_mode  = input.string("趋势追踪 (牛市)", "手动模式", options=["均值回归 (震荡)", "趋势追踪 (牛市)"], group=grp_mode)
+
+grp_buy     = "🚀 信号灵敏度"
+calc_mode   = input.string("自动托管 (Auto)", "参数模式", options=["自动托管 (Auto)", "专家手动 (Manual)"], group=grp_buy)
+sensitivity = input.string("标准", "灵敏度", options=["保守", "标准", "激进"], group=grp_buy)
+
+// 手动参数
+bias_len_m    = input.int(20, "BIAS周期", minval=2, group=grp_buy)
+buy_deep_m    = input.float(-10.0, "抢筹阈值", step=0.5, group=grp_buy)
+buy_mid_m     = input.float(-7.0, "建仓阈值", step=0.5, group=grp_buy)
+buy_light_m   = input.float(-5.0, "加仓阈值", step=0.5, group=grp_buy)
+req_factors_m = input.int(1, "最少辅助因子", minval=0, maxval=5, group=grp_buy)
+
+enable_trend_follow = input.bool(true, "启用趋势过滤", group=grp_buy)
+trend_mode  = input.string("MA120 (半年线)", "趋势标准", options=["MA120 (半年线)", "MA250 (年线)", "双重共振 (极严)", "关闭趋势过滤"], group=grp_buy)
+
+grp_filter  = "🔍 因子过滤 & VPA"
+enable_corr_filter = input.bool(true, "量价相关性增强", group=grp_filter)
+enable_wyckoff     = input.bool(true, "Wyckoff VPA 增强", tooltip="启用努力与结果、停止量等高级量价逻辑", group=grp_filter)
+// [v6.0 Lite新增] MTF多周期共振（可选）
+enable_mtf_filter = input.bool(false, "MTF多周期共振", tooltip="启用后会根据日线/周线趋势调整买入阈值（可选功能，默认关闭保持v5.9信号量）", group=grp_filter)
+corr_len    = input.int(20, "相关性周期", group=grp_filter)
+
+grp_sys     = "⚙️ 基准与风控"
+mkt_choice  = input.string("自动识别 (Auto)", "市场板幅", options=["自动识别 (Auto)", "强制: A股主板 (10%)", "强制: 科创/创业 (20%)", "强制: 港/美股 (T+0)"], group=grp_sys)
+index_source = input.string("智能自适应 (Auto)", "大盘基准", options=["智能自适应 (Auto)", "手动指定 (Manual)"], group=grp_sys)
+manual_index = input.string("SSE:000001", "手动代码", group=grp_sys)
+enable_market_filter = input.bool(false, "大盘环境过滤", group=grp_sys)
+
+cool_down_buy = input.int(3, "买入冷却(Bar)", minval=1, group=grp_sys)
+cool_down_sell = input.int(2, "卖出冷却(Bar)", minval=1, group=grp_sys)
+enable_liquidity_filter = input.bool(true, "流动性过滤", group=grp_sys)
+// [Patch Note]: enable_strict_limit 逻辑已硬编码入核心风控，此参数仅作UI保留或辅助
+enable_strict_limit = input.bool(true, "严格涨停不买", tooltip="A股特化风控：只要今日最高价触及涨停，无论是否封板，强制过滤买入信号", group=grp_sys)
+enable_ranging_filter = input.bool(true, "震荡市过滤", group=grp_sys)
+enable_confirm_bar = input.bool(true, "K线确认机制", tooltip="开启(默认): 当天显示黄色'待'字，次日确认安全后变红。适合盘中分析观察。", group=grp_sys)
+// [v5.7新增] VWAP过滤
+enable_vwap_filter = input.bool(false, "VWAP低于过滤", tooltip="开启后，价格高于VWAP时不触发买入信号（更保守）", group=grp_sys)
+
+grp_sell    = "🔻 离场与风控"
+bb_len      = 20
+bb_mult     = 2.0
+sell_bias_m = input.float(9.0, "BIAS狂热阈值", group=grp_sell) 
+sl_type     = input.string("ATR智能止损", "趋势支撑线算法", options=["ATR智能止损", "固定前低"], tooltip="仅用于显示趋势支撑位，不进行账户计算", group=grp_sell)
+atr_mult_m  = input.float(2.0, "ATR倍数", minval=1.0, maxval=4.0, step=0.5, group=grp_sell)
+enable_struct_sl = input.bool(false, "叠加结构性支撑", tooltip="开启后支撑线会参考近5日低点", group=grp_sell)
+enable_divergence = input.bool(true, "顶背离检测", group=grp_sell)
+enable_sell_confirm = input.bool(true, "离场确认机制", group=grp_sell)
+
+grp_display = "📊 显示设置"
+show_panel  = input.bool(true, "显示分析面板", group=grp_display)
+panel_theme = input.string("自适应", "面板主题", options=["自适应", "浅色", "深色"], group=grp_display)
+compact_panel = input.bool(false, "精简面板", group=grp_display)
+show_ma     = input.bool(true, "显示均线", group=grp_display)
+show_signal_strength = input.bool(true, "显示信号强度", group=grp_display)
+show_factor_count = input.bool(true, "显示因子确认", group=grp_display)
+sl_line_style = input.string("圆点", "支撑线样式", options=["实线", "虚线", "圆点", "十字"], group=grp_display)
+enable_pattern_detection = input.bool(true, "K线形态识别", group=grp_display)
+show_pattern_labels = input.bool(true, "形态标签", group=grp_display)
+
+// ==========================================
+// 1.1 参数逻辑映射
+// ==========================================
+var int p_bias_len = 20
+var float p_buy_deep = -10.0
+var float p_buy_mid = -7.0
+var float p_buy_light = -5.0
+var float p_atr_mult = 2.0
+var int p_req_factors = 1
+var float p_sell_bias = 9.0
+
+if calc_mode == "自动托管 (Auto)"
+    if sensitivity == "保守"
+        p_bias_len := 25
+        p_buy_deep := -13.0
+        p_buy_mid  := -10.0
+        p_buy_light:= -7.0
+        p_atr_mult := 2.5
+        p_req_factors := 3 
+        p_sell_bias := 10.0
+    else if sensitivity == "激进"
+        p_bias_len := 13
+        p_buy_deep := -8.0
+        p_buy_mid  := -5.0
+        p_buy_light:= -3.0
+        p_atr_mult := 1.5
+        p_req_factors := 1
+        p_sell_bias := 8.0
+    else 
+        p_bias_len := 20
+        p_buy_deep := -10.0
+        p_buy_mid  := -7.0
+        p_buy_light:= -5.0
+        p_atr_mult := 2.0
+        p_req_factors := 2
+        p_sell_bias := 9.0
+else
+    p_bias_len := bias_len_m
+    p_buy_deep := buy_deep_m
+    p_buy_mid  := buy_mid_m
+    p_buy_light:= buy_light_m
+    p_atr_mult := atr_mult_m
+    p_req_factors := req_factors_m
+    p_sell_bias := sell_bias_m
+
+// ==========================================
+// 2. 智能市场与基准识别
+// ==========================================
+string cur_code = syminfo.currency
+string tk_name  = syminfo.ticker
+bool is_cn_market = (cur_code == "CNY")
+
+bool is_star    = is_cn_market and str.startswith(tk_name, "688")
+bool is_chi     = is_cn_market and (str.startswith(tk_name, "30") or str.startswith(tk_name, "68"))
+bool is_bse     = is_cn_market and (str.startswith(tk_name, "8") or str.startswith(tk_name, "4"))
+bool is_st      = str.contains(tk_name, "ST") or str.contains(tk_name, "*ST")
+bool is_new_stock = bar_index < 60
+high_250 = ta.highest(high, 250)
+distance_from_high_pct = (high_250 - close) / high_250 * 100
+is_high_position = distance_from_high_pct < 10
+risk_label = is_new_stock ? "⚠️新股" : (is_high_position ? "⚠️高位" : (is_st ? "⚠️ST" : ""))
+
+var float limit_up_r = 1.098
+var float limit_dn_r = 0.902
+var bool  is_t1      = true
+var string mkt_name  = "未知"
+
+// 智能基准路由逻辑
+get_benchmark(is_auto, manual_sym) =>
+    string idx = "SSE:000001"
+    string name = "上证指数"
+    if not is_auto
+        idx := manual_sym
+        name := "手动指定"
+    else
+        if cur_code == "USD"
+            idx := "TVC:SPX"
+            name := "标普500"
+        else if cur_code == "HKD"
+            idx := "TVC:HSI"
+            name := "恒生指数"
+        else if is_cn_market
+            if str.startswith(tk_name, "688")
+                idx := "SSE:000688"
+                name := "科创50"
+            else if str.startswith(tk_name, "30")
+                idx := "SZSE:399006"
+                name := "创业板指"
+            else if str.startswith(tk_name, "8") or str.startswith(tk_name, "4")
+                idx := "BSE:899050"
+                name := "北证50"
+            else
+                idx := "SSE:000001"
+                name := "上证指数"
+    [idx, name]
+
+[target_index_symbol, target_index_name] = get_benchmark(index_source == "智能自适应 (Auto)", manual_index)
+
+if mkt_choice == "自动识别 (Auto)"
+    if not is_cn_market
+        limit_up_r := 2.000
+        limit_dn_r := 0.000
+        is_t1      := false
+        mkt_name   := "外盘/T0"
+    else
+        is_t1 := true
+        if is_st
+            limit_up_r := 1.05
+            limit_dn_r := 0.95
+            mkt_name   := "ST股(5%)"
+        else if is_star or str.startswith(tk_name, "30")
+            limit_up_r := 1.196
+            limit_dn_r := 0.804
+            mkt_name   := is_star ? "科创(20%)" : "创业(20%)"
+        else if is_bse
+            limit_up_r := 1.295
+            limit_dn_r := 0.705
+            mkt_name   := "北交(30%)"
+        else
+            limit_up_r := 1.098
+            limit_dn_r := 0.902
+            mkt_name   := "主板(10%)"
+else if mkt_choice == "强制: A股主板 (10%)"
+    limit_up_r := 1.098
+    limit_dn_r := 0.902
+    is_t1      := true
+    mkt_name   := "主板(手)"
+else if mkt_choice == "强制: 科创/创业 (20%)"
+    limit_up_r := 1.196
+    limit_dn_r := 0.804
+    is_t1      := true
+    mkt_name   := "科创(手)"
+else
+    limit_up_r := 2.000
+    limit_dn_r := 0.000
+    is_t1      := false
+    mkt_name   := "外盘(手)"
+
+// ==========================================
+// 3. 核心计算
+// ==========================================
+ma5   = ta.sma(close, 5)
+ma20  = ta.sma(close, 20)
+ma120 = ta.sma(close, 120)
+ma250 = ta.sma(close, 250)
+
+// 全局计算
+lowest_low_30 = ta.lowest(low, 30)
+lowest_low_60 = ta.lowest(low, 60)
+
+// [V5.3 优化]: 回归诚实的 Z-Score (不加盖子)
+calc_honest_z_score(len) =>
+    float log_close = math.log(close)
+    float log_ma = ta.sma(log_close, len)
+    float log_std = ta.stdev(log_close, len)
+    float z_val = log_std > 0 ? (log_close - log_ma) / log_std : 0.0
+    float ma_base = math.exp(log_ma)
+    [ma_base, z_val]
+
+[ma_bias_base, z_score] = calc_honest_z_score(p_bias_len)
+bias  = (close - ma_bias_base) / ma_bias_base * 100
+
+basis = ta.sma(close, bb_len)
+dev   = bb_mult * ta.stdev(close, bb_len)
+upper = basis + dev
+lower = basis - dev
+bb_position = (close - lower) / (upper - lower) * 100
+bb_oversold = bb_position < 20
+bb_overbought = bb_position > 80
+
+high_52w = ta.highest(high, 252)
+low_52w = ta.lowest(low, 252)
+price_position_52w = (close - low_52w) / (high_52w - low_52w) * 100
+is_52w_low_area = price_position_52w < 30
+is_52w_high_area = price_position_52w > 70
+
+float z_buy_deep = sensitivity == "保守" ? -2.40 : (sensitivity == "激进" ? -1.50 : -1.96)
+float z_buy_mid = sensitivity == "保守" ? -1.90 : (sensitivity == "激进" ? -1.00 : -1.50)
+
+vol_ma5 = ta.sma(volume, 5)
+vol_ma20 = ta.sma(volume, 20)
+atr_val = ta.atr(14)
+rsi_val = ta.rsi(close, 14)
+atr_percent = (atr_val / close) * 100
+
+global_lowest_5 = ta.lowest(low, 5)
+
+// ADX
+adx_len = 14
+[diplus, diminus, adx_val] = ta.dmi(adx_len, adx_len)
+
+// [v5.7新增] VWAP计算
+vwap_val = ta.vwap(hlc3)
+vwap_dev = (close - vwap_val) / vwap_val * 100  // VWAP偏离度%
+is_below_vwap = close < vwap_val
+
+// [v5.7新增] 成交额历史分位数
+turnover = volume * close
+turnover_percentile = ta.percentrank(turnover, 250)
+
+// ==========================================
+// 3.2 [v6.0 Lite新增] 多周期共振 (MTF) 系统 - 可选
+// ==========================================
+// 获取日线趋势（适用于小时级以下周期）
+mtf_daily_close = request.security(syminfo.tickerid, "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+mtf_daily_ma20 = request.security(syminfo.tickerid, "D", ta.sma(close, 20), barmerge.gaps_off, barmerge.lookahead_off)
+mtf_daily_trend = mtf_daily_close > mtf_daily_ma20
+
+// 获取周线趋势
+mtf_weekly_close = request.security(syminfo.tickerid, "W", close, barmerge.gaps_off, barmerge.lookahead_off)
+mtf_weekly_ma10 = request.security(syminfo.tickerid, "W", ta.sma(close, 10), barmerge.gaps_off, barmerge.lookahead_off)
+mtf_weekly_trend = mtf_weekly_close > mtf_weekly_ma10
+
+// MTF共振等级 (0-2)
+int mtf_confluence_level = 0
+if enable_mtf_filter
+    if mtf_daily_trend
+        mtf_confluence_level += 1
+    if mtf_weekly_trend
+        mtf_confluence_level += 1
+
+// MTF状态标签
+string mtf_status = mtf_confluence_level == 2 ? "🔥 双周期共振" : (mtf_confluence_level == 1 ? "⚠️ 部分共振" : "❌ 无共振")
+
+// ==========================================
+// 3.1 Wyckoff VPA 增强模块
+// ==========================================
+spread = high - low
+avg_spread = ta.sma(spread, 20)
+is_wide_spread = spread > avg_spread * 1.5
+is_narrow_spread = spread < avg_spread * 0.7
+is_high_volume = volume > vol_ma20 * 1.5
+is_ultra_high_volume = volume > vol_ma20 * 2.5
+is_low_volume = volume < vol_ma20 * 0.7
+
+// Wyckoff 信号逻辑
+is_stopping_volume = close < open and is_high_volume and (is_narrow_spread or (close - low) > (high - low) * 0.6)
+is_effort_no_result_bear = is_high_volume and is_narrow_spread and close > open
+is_ease_of_movement_bull = close > open and is_low_volume and is_wide_spread and close > close[1]
+is_buying_climax = is_ultra_high_volume and (high - close) > (high - low) * 0.5
+
+vpa_bullish_score = 0
+if enable_wyckoff
+    if is_stopping_volume
+        vpa_bullish_score += 1
+    if is_ease_of_movement_bull
+        vpa_bullish_score += 1
+
+// ==========================================
+// 4. 战术模式自动切换
+// ==========================================
+var bool is_auto_trend_active = true 
+bool degrade_condition = close < ma20 and adx_val < 20
+bool upgrade_condition = close > ma20 or adx_val >= 25
+
+if is_auto_trend_active
+    if degrade_condition
+        is_auto_trend_active := false
+else
+    if upgrade_condition
+        is_auto_trend_active := true
+
+bool effective_is_trend_mode = enable_auto_mode ? is_auto_trend_active : (strat_mode == "趋势追踪 (牛市)")
+string effective_strat_mode_name = effective_is_trend_mode ? "趋势追踪 (自动)" : "均值回归 (自动)"
+if not enable_auto_mode
+    effective_strat_mode_name := strat_mode
+
+// ==========================================
+// 5. 核心交易逻辑
+// ==========================================
+price_change = ta.change(close)
+volume_change = ta.change(volume)
+
+vol_surge = volume > vol_ma20 * 3.0
+price_change_pct = (close - close[1]) / close[1] * 100
+is_price_surge = math.abs(price_change_pct) > 7
+
+// 基础涨跌停判断（用于Panel显示，不用于核心风控）
+tolerance = 0.0001
+limit_up_price_calc = close[1] * limit_up_r
+// is_limit_up_touched_ui 仅用于 UI
+is_limit_up_touched_ui = high >= limit_up_price_calc * 0.995 
+is_limit_up = not na(close[1]) and (close >= close[1] * limit_up_r * (1 - tolerance)) and (high >= close * (1 - tolerance))
+is_limit_down = not na(close[1]) and (close <= close[1] * limit_dn_r * (1 + tolerance)) and (low <= close * (1 + tolerance))
+is_flat_bar   = (open == close) and (high == low)
+is_limit_dn_one_word = is_flat_bar and (close < close[1])
+is_limit_up_one_word = is_flat_bar and (close > close[1])
+price_lower = close < close[5]
+vol_higher = volume > vol_ma20 * 1.5
+is_bottom_surge = price_lower and vol_higher and close > open
+
+avg_amount_20 = ta.sma(volume * close, 20)
+liquidity_level = avg_amount_20 > 100000000 ? "优秀" : (avg_amount_20 > 50000000 ? "良好" : (avg_amount_20 > 10000000 ? "一般" : "较差"))
+
+string market_currency = syminfo.currency
+float liquidity_threshold = market_currency == "USD" ? 2000000 : (market_currency == "CNY" ? 50000000 : (market_currency == "HKD" ? 50000000 : (market_currency == "JPY" ? 100000000 : 3000000)))
+
+float vol_ratio = volume / vol_ma20
+string activity_status = vol_ratio > 1.5 ? " (活跃)" : (vol_ratio < 0.6 ? " (沉寂)" : " (正常)")
+
+// =========================================
+// [v6.1_fix2] 分层超跌检测
+// 极度超跌：豁免趋势+流动性过滤
+// 深度超跌：豁免趋势过滤，放宽流动性
+// =========================================
+bool is_extreme_oversold = (bias < -15) or (z_score < -2.5)
+bool is_deep_oversold_tier = (bias < -10) or (z_score < -2.0)
+
+// 原始流动性判断
+bool liquidity_ok_raw = avg_amount_20 > liquidity_threshold
+bool liquidity_filter_standard = liquidity_ok_raw and vol_ratio > 0.6
+bool liquidity_filter_relaxed = liquidity_ok_raw and vol_ratio > 0.4  // 放宽版
+
+// [v6.1_fix2] 分层流动性过滤
+// 极度超跌：完全豁免流动性过滤
+// 深度超跌：使用放宽版（0.4阈值）
+// 其他：使用标准版（0.6阈值）
+bool liquidity_ok = true
+if enable_liquidity_filter
+    if is_extreme_oversold
+        liquidity_ok := true  // 极度超跌豁免
+    else if is_deep_oversold_tier
+        liquidity_ok := liquidity_filter_relaxed  // 深度超跌放宽
+    else
+        liquidity_ok := liquidity_filter_standard  // 标准
+
+// 原始趋势判断
+bool is_trend_pass_raw = true
+if trend_mode == "MA120 (半年线)"
+    is_trend_pass_raw := close > ma120
+else if trend_mode == "MA250 (年线)"
+    is_trend_pass_raw := close > ma250
+else if trend_mode == "双重共振 (极严)"
+    is_trend_pass_raw := (close > ma120) and (close > ma250)
+else if trend_mode == "关闭趋势过滤"
+    is_trend_pass_raw := true
+
+// [v6.1_fix2] 分层趋势过滤
+// 极度超跌或深度超跌：豁免趋势过滤
+bool is_trend_pass = is_trend_pass_raw or is_extreme_oversold or is_deep_oversold_tier
+
+var float index_ma20 = na
+var float index_price = na
+if enable_market_filter
+    index_price := request.security(target_index_symbol, timeframe.period, close)
+    index_ma20 := request.security(target_index_symbol, "D", ta.sma(close, 20))
+
+is_market_bullish = enable_market_filter and not na(index_price) ? (index_price > index_ma20) : true
+market_pass = enable_market_filter ? is_market_bullish : true
+
+// ==========================================
+// 6. 多因子指标与评分系统
+// ==========================================
+is_strong_trend = adx_val > 25
+is_uptrend_adx = diplus > diminus
+
+[macd_line, signal_line, hist] = ta.macd(close, 12, 26, 9)
+macd_golden = ta.crossover(macd_line, signal_line)
+macd_dead = ta.crossunder(macd_line, signal_line)
+macd_bullish = macd_line > signal_line and hist > hist[1]
+macd_bearish = macd_line < signal_line and hist < hist[1]
+
+kd_len = 9
+k_smooth = 3
+d_smooth = 3
+lowest_low = ta.lowest(low, kd_len)
+highest_high = ta.highest(high, kd_len)
+range_val = highest_high - lowest_low
+rsv = range_val > 0.001 ? (100 * (close - lowest_low) / range_val) : 50.0
+k_val = ta.sma(rsv, k_smooth)
+d_val = ta.sma(k_val, d_smooth)
+j_val = 3 * k_val - 2 * d_val
+kdj_oversold = j_val < 20
+kdj_overbought = j_val > 80
+kdj_golden = ta.crossover(k_val, d_val) and k_val < 50
+
+mfi_val = ta.mfi(hlc3, 14)
+mfi_oversold = mfi_val < 30
+mfi_overbought = mfi_val > 70
+
+obv_val = ta.obv
+obv_ma = ta.sma(obv_val, 20)
+obv_rising = obv_val > obv_ma
+
+// ==========================================
+// 8. 阈值与背离
+// ==========================================
+atr_ma_60 = ta.sma(atr_percent, 60)
+volatility_ratio = atr_percent / math.max(atr_ma_60, 0.01)
+volatility_ratio_capped = math.max(0.7, math.min(volatility_ratio, 1.5))
+trend_adjust = is_trend_pass ? (1.0 / volatility_ratio_capped) : (volatility_ratio_capped * 0.85)
+
+base_deep = p_buy_deep * trend_adjust
+base_mid = p_buy_mid * trend_adjust
+base_light = p_buy_light * trend_adjust
+
+// [V5.6 修复]: 负数阈值用 math.min 取更负值（更严格），math.max 取更浅值（更宽松）
+adaptive_buy_deep = math.min(p_buy_deep * 0.5, math.max(p_buy_deep * 1.5, base_deep))
+adaptive_buy_mid = math.min(p_buy_mid * 0.5, math.max(p_buy_mid * 1.5, base_mid))
+adaptive_buy_light = math.min(p_buy_light * 0.5, math.max(p_buy_light * 1.5, base_light))
+
+base_sell = p_sell_bias / volatility_ratio_capped
+adaptive_sell_bias_raw = math.min(p_sell_bias * 1.5, math.max(p_sell_bias * 0.5, base_sell))
+adaptive_sell_bias = effective_is_trend_mode ? math.max(adaptive_sell_bias_raw, p_sell_bias * 1.1) : adaptive_sell_bias_raw
+
+// ==========================================
+// 9. Alpha 投票系统 (保留 v5.5 纯粹逻辑)
+// ==========================================
+
+// [v6.1提前定义] 量价相关性用于Alpha评分，需在函数前定义
+log_price_return = not na(close[1]) and close[1] > 0 ? math.log(close / close[1]) : 0
+vol_prev_safe = nz(volume[1], volume)
+log_volume_change = vol_prev_safe > 0 ? math.log(volume / vol_prev_safe) : 0
+pv_corr_log_5 = ta.correlation(log_price_return, log_volume_change, 5)
+pv_corr_log_20 = ta.correlation(log_price_return, log_volume_change, 20)
+
+detect_hammer() =>
+    body = math.abs(close - open)
+    full_range = high - low
+    lower_shadow = math.min(close, open) - low
+    upper_shadow = high - math.max(close, open)
+    is_long_lower_shadow = (body > 0.001) ? (lower_shadow >= body * 2) : (lower_shadow > full_range * 0.6)
+    is_small_upper_shadow = upper_shadow <= lower_shadow * 0.3
+    (is_long_lower_shadow and is_small_upper_shadow) and low <= lowest_low_30 * 1.10
+
+bool is_hammer = enable_pattern_detection ? detect_hammer() : false
+pattern_bullish = is_hammer ? 0.3 : 0
+
+// 1. 智能飞刀识别 (Smart Knife)
+clv = (high != low) ? ((close - low) - (high - close)) / (high - low) : 0.0
+is_clv_low = clv < -0.7 
+range_curr = high - low
+avg_range_20 = ta.sma(range_curr, 20)
+is_range_wide = range_curr > avg_range_20 * 1.5
+is_falling_knife_smart = is_clv_low and is_range_wide and close < open
+
+// 2. 缩量跌停陷阱 (Liquidity Lock)
+// 注意：此处仅作为Alpha扣分项，硬性过滤在 Patch 1 中
+is_liquidity_lock_alpha = (close < close[1] * 0.92) and (volume < vol_ma20 * 0.1)
+
+// 3. 结构性破位 (Donchian Breakdown)
+is_structural_breakdown = close < lowest_low_60[1]
+
+calc_alpha_voting() =>
+    float points = 0.0
+    
+    // --- 核心风控层 ---
+    if is_liquidity_lock_alpha
+        points -= 10.0 // 缩量跌停，绝对禁入
+    else if is_falling_knife_smart
+        points -= 5.0  // 光脚飞刀，扣分
+    
+    // =========================================
+    // [v6.1 Qlib大规模优化] 基于763万样本IC分析
+    // 验证数据: 全A股 / 2005-2020 / 3805只股票
+    // LightGBM验证集IC: 0.0367
+    // =========================================
+    
+    // --- A. [v6.1核心] 动量因子组（最强因子！）---
+    // mom_5: IC=-0.075 最强！  mom_20: IC=-0.066 权重27.5%
+    if not is_falling_knife_smart and not is_liquidity_lock_alpha
+        float mom_5 = close / close[5] - 1
+        float mom_20 = close / close[20] - 1
+        
+        // 5日动量超跌
+        if mom_5 < -0.15
+            points += 2.0  // 深度超跌动量
+        else if mom_5 < -0.08
+            points += 1.2  // 中度超跌
+        else if mom_5 < -0.03
+            points += 0.5  // 轻度超跌
+        
+        // 20日动量超跌 (权重最高27.5%)
+        if mom_20 < -0.25
+            points += 2.5  // 深度超跌
+        else if mom_20 < -0.15
+            points += 1.5  // 中度超跌
+        else if mom_20 < -0.05
+            points += 0.8  // 轻度超跌
+    
+    // --- B. BIAS超跌组（IC=-0.070）---
+    if not is_falling_knife_smart and not is_liquidity_lock_alpha
+        // BIAS20
+        if bias < adaptive_buy_deep * 1.3
+            if volume > vol_ma20
+                points += 2.0  // 极度深跌 + 放量
+            else
+                points += 1.2  // 极度深跌
+        else if bias < adaptive_buy_deep
+            points += 1.0
+        else if bias < adaptive_buy_mid
+            points += 0.5
+        
+        // BIAS13（IC=-0.070，独立有效）
+        float bias_13 = (close - ta.sma(close, 13)) / ta.sma(close, 13) * 100
+        if bias_13 < -10
+            points += 1.2  // 深度超跌
+        else if bias_13 < -6
+            points += 0.7
+    
+    // --- C. 量价相关性（IC=-0.056~0.060）---
+    if not is_falling_knife_smart and not is_liquidity_lock_alpha
+        if not na(pv_corr_log_5)
+            if pv_corr_log_5 < -0.3
+                points += 1.0  // 短期强背离
+            else if pv_corr_log_5 < 0
+                points += 0.4
+        
+        if not na(pv_corr_log_20)
+            if pv_corr_log_20 < -0.3
+                points += 0.8  // 中期强背离
+            else if pv_corr_log_20 < 0
+                points += 0.3
+
+    // --- D. Z-Score（IC=-0.055）---
+    float dynamic_z_deep = z_buy_deep
+    if volatility_ratio > 1.5 
+        dynamic_z_deep := z_buy_deep * 0.7
+    
+    if z_score < dynamic_z_deep
+        points += 1.0
+    else if z_score < z_buy_mid
+        points += 0.5
+
+    // --- E. 布林带位置（IC=-0.055）---
+    if bb_oversold
+        points += 0.7
+
+    // --- F. [v6.1恢复] RSI（IC=-0.056，大样本验证有效！）---
+    if rsi_val < 20
+        points += 1.2  // 极度超卖
+    else if rsi_val < 30
+        points += 0.6  // 超卖
+    
+    // --- G. 其他动量指标 ---
+    if kdj_oversold or kdj_golden
+        points += 0.4
+    if mfi_oversold
+        points += 0.4
+    if macd_golden or macd_bullish
+        points += 0.4
+    if enable_wyckoff and is_stopping_volume
+        points += 1.0  // VPA仍有价值
+
+    // --- H. [v6.1恢复] 52周位置（IC=-0.034，大样本验证有效！）---
+    // LightGBM权重11.3%，需恢复
+    if is_52w_low_area
+        points += 1.0  // 从0.3恢复到1.0
+    
+    // --- I. 锤子线（权重低）---
+    if pattern_bullish > 0
+        points += 0.2
+        
+    points
+
+voting_score = calc_alpha_voting()
+// [v6.1调整] 阈值匹配新权重分布（总分上限~16）
+pass_score_threshold = sensitivity == "激进" ? 3.0 : (sensitivity == "保守" ? 5.0 : 4.0)
+
+// [v5.7修复] 删除pattern_bullish重复计分，已在calc_alpha_voting()中计入
+
+// ==========================================
+// 9.1 [v6.1注] 量价相关性已在第464行提前定义，此处仅保留兼容性映射
+// ==========================================
+
+// OBV趋势强度（使用标准差归一化）
+obv_slope_20 = obv_val - obv_val[20]
+obv_std_20 = ta.stdev(obv_val, 20)
+obv_trend_strength = obv_std_20 > 0 ? (obv_slope_20 / obv_std_20) : 0
+
+// 保留原变量名用于兼容性
+pv_corr_5 = pv_corr_log_5
+pv_corr_10 = pv_corr_log_5  // v5.9中pv_corr_10未使用，映射到5期
+pv_corr_20 = pv_corr_log_20
+
+detect_obv_divergence() =>
+    lookback = 20
+    price_high = ta.highest(high, lookback)
+    price_new_high = high >= price_high[1]
+    obv_high = ta.highest(obv_val, lookback)
+    obv_not_high = obv_val < obv_high[1]
+    top_div = price_new_high and obv_not_high and close > ma20
+    price_low = ta.lowest(low, lookback)
+    price_new_low = low <= price_low[1]
+    obv_low = ta.lowest(obv_val, lookback)
+    obv_not_low = obv_val > obv_low[1]
+    bottom_div = price_new_low and obv_not_low and close < ma20
+    [top_div, bottom_div]
+
+[obv_top_div, obv_bottom_div] = detect_obv_divergence()
+
+calc_divergence_strength() =>
+    int strength = 0
+    if pv_corr_log_20 < 0.1  // [使用新的对数相关性]
+        strength += 3
+    if vol_ratio < 0.6
+        strength += 2
+    if obv_top_div
+        strength += 2
+    // [v6.0 Lite新增] OBV趋势转弱
+    if obv_trend_strength < -0.5
+        strength += 2
+    strength
+
+divergence_strength = calc_divergence_strength()
+divergence_level = divergence_strength >= 9 ? "严重🔴🔴" : (divergence_strength >= 7 ? "严重🔴" : (divergence_strength >= 5 ? "中度⚠️⚠️" : (divergence_strength >= 3 ? "轻微⚠️" : "无")))
+
+is_price_uptrend = close > ta.sma(close, 20) and close > close[20]
+is_top_divergence_enhanced = enable_divergence and divergence_strength >= 5 and is_price_uptrend and (close > upper or rsi_val > 70)
+// [v6.0 Lite优化] 底背离使用新的对数相关性
+is_bottom_divergence_buy = obv_bottom_div and (pv_corr_log_5 > 0.5 or volume > vol_ma20 * 1.5) and bias < adaptive_buy_mid
+if is_bottom_divergence_buy
+    voting_score += 1.0 
+
+// ==========================================
+// 10. 信号逻辑 (注入 Ultimate Patches)
+// ==========================================
+cond_shrink = volume < vol_ma5 * 1.2
+cond_red    = close > open
+cond_crash  = volume > vol_ma5 * 2.5 and close < open
+
+// >>>>> PATCH 1: SAFETY LAYER (Survival) <<<<<
+// 1. 缩量跌停检测 (Liquidity Lock) - [v5.7修复] 使用均价+收盘双重验证防止长下影线误杀
+avg_price_safety = (open + high + low + close) / 4
+is_liquidity_lock = (avg_price_safety < close[1] * 0.94) and (volume < vol_ma20 * 0.15) and (close < close[1] * 0.92)
+
+// 2. 涨停触板检测 (Limit Up Risk) - 今日触板即禁买 [可配置风控]
+limit_up_price_dynamic = close[1] * 1.10 
+// 科创/创业板修正
+if str.startswith(tk_name, "688") or str.startswith(tk_name, "30")
+    limit_up_price_dynamic := close[1] * 1.20
+
+is_limit_up_touched = high >= limit_up_price_dynamic * 0.995
+// [V5.6+ 优化]: 涨停触板风控改为可配置，而非强制执行
+limit_risk_active = enable_strict_limit and is_limit_up_touched
+
+// 3. 最终安全检查 (Feasibility Check)
+// 硬性风控: 缩量跌停
+// 可选风控: 涨停触板(受enable_strict_limit控制)
+is_basic_safe = not cond_crash and not is_limit_down and not is_limit_dn_one_word and liquidity_ok and not is_liquidity_lock and not limit_risk_active
+// <<<<< END PATCH 1 <<<<<
+
+cond_reversal = (close > open) or (close > close[1])
+volume_confirm = volume > vol_ma5 * 0.8 or is_bottom_surge or (enable_wyckoff and is_stopping_volume)
+price_volume_ok = cond_reversal and volume_confirm
+
+pv_corr = ta.correlation(price_change, volume_change, corr_len)
+is_panic_selling = close < open and volume > vol_ma20 * 1.5
+is_correlation_strong = math.abs(pv_corr) > 0.5 
+if enable_corr_filter and is_panic_selling and is_correlation_strong
+    voting_score += 1.0
+
+factor_count_buy = 0
+if kdj_oversold or kdj_golden
+    factor_count_buy += 1
+if mfi_oversold
+    factor_count_buy += 1
+if rsi_val < 40
+    factor_count_buy += 1
+if macd_bullish or macd_golden
+    factor_count_buy += 1
+if obv_rising
+    factor_count_buy += 1
+if pattern_bullish > 0
+    factor_count_buy += 1
+if is_bottom_divergence_buy
+    factor_count_buy += 1
+if is_52w_low_area
+    factor_count_buy += 1
+if bb_oversold
+    factor_count_buy += 1
+if enable_corr_filter and is_panic_selling and is_correlation_strong
+    factor_count_buy += 1
+if enable_wyckoff and vpa_bullish_score > 0
+    factor_count_buy += 1
+// [v6.0 Lite新增] MTF共振加分（可选）
+if enable_mtf_filter and mtf_confluence_level == 2
+    factor_count_buy += 1
+
+buy_threshold = pass_score_threshold
+is_ranging = enable_ranging_filter ? (adx_val < 20) : false
+// [v6.0 Lite新增] MTF共振调整阈值（可选）
+buy_threshold_mtf_adjusted = buy_threshold
+if is_ranging
+    buy_threshold_mtf_adjusted := buy_threshold + 1.0  // 震荡市更严格
+else if enable_mtf_filter and mtf_confluence_level == 0 and effective_is_trend_mode
+    buy_threshold_mtf_adjusted := buy_threshold + 0.5  // 趋势模式但无MTF共振，提高阈值
+multi_factor_pass = voting_score >= buy_threshold_mtf_adjusted
+
+// [Patch Fix]: Filter high position pullbacks to avoid double-top traps
+// is_high_position defined at line 142 (top 10% of 52w high)
+trend_pullback_strict = enable_trend_follow and is_trend_pass and (close <= ma20 * 1.02) and (close > ma20 * 0.98) and (ma5 > ma20) and cond_red and (volume > vol_ma5 * 0.7) and not is_high_position
+trend_pullback_relaxed = enable_trend_follow and is_trend_pass and (close <= ma20 * 1.05) and (close > ma20 * 0.95) and (ma5 > ma20) and (volume > vol_ma5 * 0.5) and not is_high_position
+// [v5.7新增] 波浪回调买入：趋势中回调到MA5（不要求触及MA20）
+trend_wave_pullback = enable_trend_follow and is_trend_pass and (close > ma20) and (close <= ma5 * 1.03) and (close > ma5 * 0.97) and (ma5 > ma20) and (adx_val > 20) and cond_red and (volume > vol_ma5 * 0.6) and not is_high_position
+trend_pullback = trend_pullback_strict or trend_pullback_relaxed or trend_wave_pullback
+
+is_deep_oversold = (z_score < z_buy_deep) or (bias < adaptive_buy_deep)
+is_mid_oversold  = (z_score < z_buy_mid) or (bias < adaptive_buy_mid)
+
+// >>>>> PATCH 2: ENTRY LOGIC (Flexible) <<<<<
+// [V5.6 微调]: 恐慌放量平衡精度与召回 - 1.8倍量能 + 阴线 + 下影线40%+
+is_panic_volume_strict = (volume > vol_ma20 * 1.8) and (close < open) and ((close - low) > (high - low) * 0.4)
+
+// 抢筹条件（优先级排序）：极度超跌 + 安全检查 + 量价确认
+// 优先1: 缩量企稳（低风险）
+// 优先2: 红K承接 / 底部放量（中风险）
+// 优先3: 恐慌止跌（高风险，平衡条件）
+buy_level1_base = is_deep_oversold and is_basic_safe and (cond_shrink or cond_red or is_bottom_surge or is_panic_volume_strict)
+// <<<<< END PATCH 2 <<<<<
+
+market_filter_condition = not enable_market_filter or market_pass or (z_score < z_buy_deep * 1.2)
+// VWAP过滤：开启后仅当价格低于VWAP时允许买入
+vwap_filter_pass = not enable_vwap_filter or is_below_vwap
+// 使用MTF调整后的阈值
+buy_level1 = buy_level1_base and vwap_filter_pass and (p_req_factors == 0 or (voting_score >= buy_threshold_mtf_adjusted - 2.0)) and market_filter_condition
+
+buy_level2_base_oversold = (is_mid_oversold and not is_deep_oversold) and is_basic_safe and price_volume_ok
+buy_level2_base = (buy_level2_base_oversold and is_trend_pass) or trend_pullback
+buy_level2 = buy_level2_base and vwap_filter_pass and multi_factor_pass and market_filter_condition
+
+buy_level3_base_oversold = (bias < adaptive_buy_light and bias >= adaptive_buy_mid) and is_basic_safe and (close > open)
+buy_level3_base_trend = (bias > -3 and bias < 2) and is_trend_pass and (is_strong_trend or is_uptrend_adx) and (close > ma5) and (close <= ma5 * 1.015) and cond_red and not is_high_position
+buy_level3_base = (buy_level3_base_oversold or buy_level3_base_trend)
+buy_level3 = buy_level3_base and vwap_filter_pass and multi_factor_pass and market_filter_condition
+
+// ==========================================
+// 10.0 趋势追踪买入信号
+// ==========================================
+// 1. 突破买入：20日新高 + 放量 + 趋势明确
+high_20 = ta.highest(high, 20)
+is_breakout_buy = effective_is_trend_mode and close > high_20[1] and volume > vol_ma20 * 1.3 and adx_val > 25 and close > ma20 and not is_limit_up and rsi_val < 80 and not is_high_position
+
+// 2. 动量追踪：均线多头 + 价格动量 + RSI强势
+is_momentum_buy = effective_is_trend_mode and close > ma5 and ma5 > ma20 and ma20 > ma120 and close > close[5] * 1.03 and rsi_val > 50 and rsi_val < 75 and macd_bullish and volume > vol_ma5 * 0.8 and not is_breakout_buy and not is_high_position
+
+// 3. 首板跟随：昨日涨停 + 今日继续涨 + 可买入
+is_first_limit_follow = effective_is_trend_mode and is_limit_up[1] and close > close[1] and volume > volume[1] * 0.5 and not is_limit_up and close > ma5 and rsi_val < 85 and not is_high_position
+
+// 4. [v6.1_fix2新增] 底部放量突破：从底部突破MA20 + 放量
+// 条件：刚突破MA20 + 放量 + 之前处于超跌
+float bias_5_ago = (close[5] - ma_bias_base[5]) / ma_bias_base[5] * 100
+bool was_recently_oversold = bias_5_ago < -8 or bias[10] < -10
+bool is_bottom_breakout = effective_is_trend_mode and close > ma20 and close[1] < ma20 and volume > vol_ma20 * 1.5 and was_recently_oversold and not is_high_position
+
+// 趋势买入信号汇总
+bool trend_buy_signal = is_breakout_buy or is_momentum_buy or is_first_limit_follow or is_bottom_breakout
+string trend_buy_type = is_breakout_buy ? "突破" : (is_bottom_breakout ? "底部突破" : (is_first_limit_follow ? "首板" : (is_momentum_buy ? "动量" : "")))
+
+// 趋势保护卖出：跟踪止盈 + 趋势破坏
+var float trail_profit_high = na
+var string signal_type = ""  // "均值回归" / "趋势追踪"
+
+// ==========================================
+// 10.1 显式状态机 
+// ==========================================
+// 状态常量
+STATE_IDLE = 0          // 空仓观望
+STATE_BUY_PENDING = 1   // 买入待确认
+STATE_HOLDING = 2       // 持仓中
+STATE_SELL_PENDING = 3  // 卖出待确认
+
+// 状态变量（单一状态源）
+var int trade_state = STATE_IDLE
+var int pending_bar = 0
+var string pending_level = ""
+var int last_buy_idx = 0
+var int last_sell_idx = 0
+var float trail_sl = na
+var string buy_level = ""
+var float initial_atr = na
+var float entry_price = na  // [v6.1_fix2] 新增：记录买入价格用于盈利保护
+var int last_buy_time = 0
+
+// 信号输出（每根K线重置）
+bool plot_buy_level1 = false
+bool plot_buy_level2 = false
+bool plot_buy_level3 = false
+bool plot_sell = false
+
+// [v6.1_fix3] 卖出类型跟踪（区分不同卖出原因）
+string sell_type = ""  // "止损", "趋势破坏", "跟踪止盈", "高抛"
+
+// 辅助变量
+timeframe_seconds = timeframe.in_seconds(timeframe.period)
+min_hold_bars = timeframe_seconds >= 604800 ? 1 : (timeframe_seconds >= 86400 ? 3 : (timeframe_seconds >= 3600 ? 3 : (timeframe_seconds >= 900 ? 4 : 5)))
+
+bool buy_level1_warning = (z_score < z_buy_deep * 0.8) and is_basic_safe and (factor_count_buy >= 1)
+bool buy_level2_warning = (z_score < z_buy_mid * 0.8) and is_trend_pass and (factor_count_buy >= 2)
+
+calc_signal_strength(string level) =>
+    base_score = level == "抢筹" ? 70.0 : (level == "建仓" ? 80.0 : 60.0)
+    factor_bonus = math.min(voting_score * 5, 30)
+    trend_bonus = is_trend_pass ? 10.0 : 0.0
+    market_bonus = market_pass ? 5.0 : 0.0
+    adx_bonus = is_strong_trend ? 5.0 : 0.0
+    total_score = base_score + factor_bonus + trend_bonus + market_bonus + adx_bonus
+    math.min(total_score, 100.0)
+
+// T+1检测
+is_same_day = (year == year(last_buy_time)) and (month == month(last_buy_time)) and (dayofmonth == dayofmonth(last_buy_time))
+is_t0_forbidden = is_t1 and is_same_day and (last_buy_time != 0)
+
+sell_warning_green = (rsi_val > 60) or (kdj_overbought) or (bias > 3)
+float effective_sell_bias = effective_is_trend_mode ? (adaptive_sell_bias * 1.5) : adaptive_sell_bias
+
+// =========================================
+// [v6.1_fix2] 重新设计"相对高位"判断
+// 核心问题: 原逻辑在下跌后的小反弹也会触发
+// 修复: 必须同时满足"涨幅"和"位置"条件
+// =========================================
+
+// A. 短期涨幅条件（必须涨了才算高位）
+float short_term_gain_5 = (close - close[5]) / close[5] * 100
+float short_term_gain_10 = (close - close[10]) / close[10] * 100
+float short_term_gain_20 = (close - close[20]) / close[20] * 100
+bool has_meaningful_gain = short_term_gain_5 > 8 or short_term_gain_10 > 12 or short_term_gain_20 > 15
+
+// B. 位置条件（必须在近期价格区间的上半部分）
+float range_high_20 = ta.highest(high, 20)
+float range_low_20 = ta.lowest(low, 20)
+float price_position_20 = (range_high_20 - range_low_20) > 0 ? (close - range_low_20) / (range_high_20 - range_low_20) * 100 : 50
+bool is_in_upper_range = price_position_20 > 60  // 在20日区间的上60%位置
+
+// C. BIAS条件（偏离度足够高）
+bool has_high_bias = bias > 5
+
+// =========================================
+// [v6.1_fix3] 量价恶化检测（卖出必须配合）
+// 核心思想：只有价格高位+量价恶化才卖出
+// =========================================
+
+// 先计算K线形态变量（后续会用到）
+float body_size_temp = math.abs(close - open)
+float upper_wick_temp = high - math.max(close, open)
+
+// 1. 量价背离（价格创新高但成交量萎缩）
+bool volume_divergence = high >= ta.highest(high, 10) and volume < vol_ma5 * 0.8
+
+// 2. 放量滞涨（放量但涨幅有限）
+bool volume_stall = volume > vol_ma20 * 1.3 and math.abs(close - open) / open * 100 < 1.5
+
+// 3. 缩量阴线（上涨后出现缩量回调）
+bool weak_pullback = close < open and volume < vol_ma5 * 0.7 and short_term_gain_5 > 5
+
+// 4. 放量长上影
+bool has_long_upper_wick = upper_wick_temp > body_size_temp * 1.2
+
+// 5. 综合量价恶化信号
+bool volume_price_warning = volume_divergence or volume_stall or weak_pullback or (has_long_upper_wick and volume > vol_ma20)
+
+// D. 综合"相对高位"判断（必须有涨幅+位置高+量价恶化）
+// [v6.1_fix3 核心改进]: is_high_position不再单独触发，必须配合量价恶化
+bool is_relative_high = (has_meaningful_gain and is_in_upper_range and volume_price_warning) or (has_high_bias and is_in_upper_range and volume_price_warning) or (is_high_position and volume_price_warning)
+
+// E. 局部高点（用于放量长上影线检测，条件更宽松但仍需要涨幅）
+float high_10 = ta.highest(high, 10)
+bool is_near_local_high = (high >= high_10 * 0.98) and (short_term_gain_5 > 5 or short_term_gain_10 > 8)
+
+// 原有严格高位判断（保留用于其他逻辑）
+cond_loc_high = effective_is_trend_mode ? (high > upper or bias > effective_sell_bias or is_high_position) : (high > upper or bias > effective_sell_bias)
+body_size = math.abs(close - open)
+upper_wick = high - math.max(close, open)
+
+// [v6.1_fix2] 放量长上影线卖出（必须在真正的相对高位）
+bool is_volume_shooting_sell = (upper_wick > body_size * 1.5) and (volume > vol_ma20 * 1.5) and is_relative_high
+
+// 原有射击之星逻辑（严格版，用于因子计分）
+is_shooting = (upper_wick > body_size * 1.6) and cond_loc_high
+
+is_bearish = close < open
+
+// Super Strong Protection: 放量长上影可突破保护
+is_super_strong = rsi_val > 70 and close > open and macd_bullish and not is_shooting and not is_volume_shooting_sell
+
+// 放量阴线高位卖出（必须在真正的相对高位）
+is_heavy_bear = (volume > vol_ma20 * 1.5) and is_bearish and is_relative_high
+
+high_5 = ta.highest(high, 5)
+is_near_recent_high = high >= high_5 * 0.98
+double_top_risk = is_near_recent_high and volume < vol_ma5 and is_bearish
+
+// 卖出因子计算
+factor_count_sell = 0
+if kdj_overbought
+    factor_count_sell += 1
+if mfi_overbought
+    factor_count_sell += 1
+if rsi_val > 70
+    factor_count_sell += 1
+if macd_bearish or macd_dead
+    factor_count_sell += 1
+if is_top_divergence_enhanced
+    factor_count_sell += 2
+if is_52w_high_area
+    factor_count_sell += 1
+if bb_overbought
+    factor_count_sell += 1
+if enable_wyckoff and is_buying_climax
+    factor_count_sell += 2
+// [Patch Fix]: Shooting Star itself is a STRONG sell factor (+2 points)
+// This ensures it satisfies the "2 factors" requirement in Trend Mode alone.
+if is_shooting
+    factor_count_sell += 2
+
+sell_warning_yellow = (factor_count_sell >= 2) and (bias > adaptive_sell_bias * 0.8)
+
+// 止损检测（只在HOLDING状态有效）
+is_sl_hit = (trade_state == STATE_HOLDING) and not na(trail_sl) and (low <= trail_sl)
+
+// 涨停封板检测
+is_firm_limit_up = (close >= limit_up_price_dynamic * 0.998) and (close == high)
+
+// 卖出条件
+// [v6.1_fix2 核心修复]: 使用is_relative_high替代cond_loc_high
+// 原问题: cond_loc_high使用布林轨判断，下跌后触及收窄的上轨也会触发
+// 修复: 必须在真正的相对高位才允许卖出
+raw_sell_base = is_relative_high and (is_bearish or is_shooting or double_top_risk) and not is_firm_limit_up and not is_limit_up and not is_limit_up_one_word and not is_super_strong
+required_sell_factors_dyn = effective_is_trend_mode ? 2 : 1
+// [v6.1_fix2]: 放量长上影线独立触发卖出，无需满足因子数量
+raw_sell_trigger = (raw_sell_base and (factor_count_sell >= required_sell_factors_dyn)) or is_heavy_bear or is_volume_shooting_sell
+
+// ==========================================
+// 10.2 状态转换逻辑（单一入口）
+// ==========================================
+if trade_state == STATE_IDLE
+    // 空仓状态：检查买入条件
+    bool can_buy = (bar_index - last_buy_idx > cool_down_buy) and (bar_index - last_sell_idx > min_hold_bars)
+    bool can_buy_l1 = (bar_index - last_buy_idx > math.floor(cool_down_buy * 0.6)) and (bar_index - last_sell_idx > min_hold_bars)
+    
+    if enable_confirm_bar
+        // 待确认模式
+        // 均值回归信号优先
+        if buy_level1 and can_buy_l1
+            trade_state := STATE_BUY_PENDING
+            pending_bar := bar_index
+            pending_level := "抢筹"
+            signal_type := "均值回归"
+        else if buy_level2 and can_buy
+            trade_state := STATE_BUY_PENDING
+            pending_bar := bar_index
+            pending_level := "建仓"
+            signal_type := "均值回归"
+        else if buy_level3 and can_buy
+            trade_state := STATE_BUY_PENDING
+            pending_bar := bar_index
+            pending_level := "加仓"
+            signal_type := "均值回归"
+        // [v5.9新增] 趋势追踪信号
+        else if trend_buy_signal and can_buy
+            trade_state := STATE_BUY_PENDING
+            pending_bar := bar_index
+            pending_level := trend_buy_type
+            signal_type := "趋势追踪"
+    else
+        // 直接入场模式
+        if buy_level1 and can_buy_l1
+            plot_buy_level1 := true
+            buy_level := "抢筹"
+            last_buy_idx := bar_index
+            initial_atr := atr_val
+            entry_price := close  // [v6.1_fix2] 记录买入价格
+            trail_sl := close - (atr_val * p_atr_mult)
+            signal_type := "均值回归"
+            trade_state := STATE_HOLDING
+        else if buy_level2 and can_buy
+            plot_buy_level2 := true
+            buy_level := "建仓"
+            last_buy_idx := bar_index
+            initial_atr := atr_val
+            entry_price := close  // [v6.1_fix2]
+            trail_sl := close - (atr_val * p_atr_mult)
+            signal_type := "均值回归"
+            trade_state := STATE_HOLDING
+        else if buy_level3 and can_buy
+            plot_buy_level3 := true
+            buy_level := "加仓"
+            last_buy_idx := bar_index
+            initial_atr := atr_val
+            entry_price := close  // [v6.1_fix2]
+            trail_sl := close - (atr_val * p_atr_mult)
+            signal_type := "均值回归"
+            trade_state := STATE_HOLDING
+        // [v5.9新增] 趋势追踪信号直接入场
+        else if trend_buy_signal and can_buy
+            plot_buy_level2 := true  // 使用建仓图标
+            buy_level := trend_buy_type
+            last_buy_idx := bar_index
+            initial_atr := atr_val
+            entry_price := close  // [v6.1_fix2]
+            trail_sl := close - (atr_val * p_atr_mult * 1.5)  // 趋势模式更宽止损
+            trail_profit_high := close  // 初始化跟踪止盈高点
+            signal_type := "趋势追踪"
+            trade_state := STATE_HOLDING
+
+else if trade_state == STATE_BUY_PENDING
+    // 买入待确认状态
+    bars_since_pending = bar_index - pending_bar
+    
+    if bars_since_pending > 3
+        // 超时，回到空仓
+        trade_state := STATE_IDLE
+        pending_level := ""
+        signal_type := ""
+    else if bars_since_pending == 1
+        // 确认日
+        is_price_hold = low >= low[1] * 0.98
+        is_volume_confirm = (volume >= volume[1] * 0.8) or (volume < volume[1] and close >= close[1])
+        is_bias_hold = bias >= bias[1] - 1.0
+        
+        // 趋势信号使用更宽松的确认条件
+        bool trend_confirm = signal_type == "趋势追踪" and close > close[1] and close > ma5
+        
+        if (signal_type == "均值回归" and is_price_hold and is_volume_confirm and is_bias_hold) or trend_confirm
+            // 确认通过
+            if pending_level == "抢筹"
+                plot_buy_level1 := true
+                buy_level := "抢筹"
+            else if pending_level == "建仓"
+                plot_buy_level2 := true
+                buy_level := "建仓"
+            else if pending_level == "加仓"
+                plot_buy_level3 := true
+                buy_level := "加仓"
+            // [v5.9新增] 趋势信号类型
+            else if pending_level == "突破" or pending_level == "动量" or pending_level == "首板" or pending_level == "底部突破"
+                plot_buy_level2 := true  // 使用建仓图标
+                buy_level := pending_level
+            
+            last_buy_idx := bar_index
+            initial_atr := atr_val
+            entry_price := close  // [v6.1_fix2] 记录买入价格
+            
+            // 趋势信号使用更宽止损并初始化跟踪止盈
+            if signal_type == "趋势追踪"
+                trail_sl := close - (atr_val * p_atr_mult * 1.5)
+                trail_profit_high := close
+            else
+                trail_sl := close - (atr_val * p_atr_mult)
+            
+            trade_state := STATE_HOLDING
+        else
+            // 确认失败
+            trade_state := STATE_IDLE
+            signal_type := ""
+        pending_level := ""
+
+else if trade_state == STATE_HOLDING
+    // 持仓状态：优先级 止损 > 趋势破坏 > 卖出条件 > 更新止损
+    
+    // [v5.9新增] 更新跟踪止盈高点
+    if signal_type == "趋势追踪" and close > trail_profit_high
+        trail_profit_high := close
+    
+    // [v5.9新增] 趋势破坏检测
+    bool is_trend_break = signal_type == "趋势追踪" and close < ma20 and ma5 < ma20 and adx_val < 20
+    
+    // [v5.9新增] 跟踪止盈触发（趋势信号专用：从高点回撤8%）
+    float trail_profit_stop = not na(trail_profit_high) ? trail_profit_high * 0.92 : na
+    bool is_trail_profit_hit = signal_type == "趋势追踪" and not na(trail_profit_stop) and close < trail_profit_stop
+    
+    // [v6.1_fix2] 盈利保护：只有盈利超过8%才允许高抛
+    bool is_profitable = not na(entry_price) and (close > entry_price * 1.08)
+    bool can_sell_with_profit = signal_type == "均值回归" and raw_sell_trigger and is_profitable and not is_t0_forbidden and (bar_index - last_sell_idx > cool_down_sell)
+    
+    // 1. 止损检测（最高优先级）
+    if is_sl_hit and (bar_index - last_sell_idx > cool_down_sell)
+        plot_sell := true
+        sell_type := "止损"  // [v6.1_fix3]
+        last_sell_idx := bar_index
+        trail_sl := na
+        trail_profit_high := na
+        entry_price := na
+        buy_level := ""
+        signal_type := ""
+        trade_state := STATE_IDLE
+    
+    // 2. [v5.9新增] 趋势破坏卖出（趋势信号专用）
+    else if is_trend_break and not is_t0_forbidden and (bar_index - last_sell_idx > cool_down_sell)
+        plot_sell := true
+        sell_type := "趋势破坏"  // [v6.1_fix3]
+        last_sell_idx := bar_index
+        trail_sl := na
+        trail_profit_high := na
+        entry_price := na
+        buy_level := ""
+        signal_type := ""
+        trade_state := STATE_IDLE
+    
+    // 3. [v5.9新增] 跟踪止盈（趋势信号专用：回撤8%离场）
+    else if is_trail_profit_hit and not is_t0_forbidden and (bar_index - last_sell_idx > cool_down_sell)
+        plot_sell := true
+        sell_type := "跟踪止盈"  // [v6.1_fix3]
+        last_sell_idx := bar_index
+        trail_sl := na
+        trail_profit_high := na
+        entry_price := na
+        buy_level := ""
+        signal_type := ""
+        trade_state := STATE_IDLE
+    
+    // 4. 均值回归卖出条件（仅用于均值回归信号）
+    // [v6.1_fix2] 盈利保护逻辑已在上方定义 (is_profitable, can_sell_with_profit)
+    else if can_sell_with_profit
+        if enable_sell_confirm
+            trade_state := STATE_SELL_PENDING
+            pending_bar := bar_index
+            pending_level := "高抛"
+        else
+            plot_sell := true
+            sell_type := "高抛"  // [v6.1_fix3]
+            last_sell_idx := bar_index
+            trail_sl := na
+            entry_price := na
+            buy_level := ""
+            signal_type := ""
+            trade_state := STATE_IDLE
+    
+    // 5. 更新跟踪止损 - [BUG FIX] 完全重写逻辑
+    // 原问题：ATR自适应会在波动扩大时导致新止损位低于当前止损，阻止止损上移
+    // 新逻辑：使用入场时固定的ATR间距，确保价格上涨时止损必然跟随上涨
+    if trade_state == STATE_HOLDING and sl_type == "ATR智能止损" and not na(trail_sl) and not na(initial_atr)
+        // 计算固定间距（基于入场时的ATR，不随当前波动变化）
+        float base_distance = initial_atr * p_atr_mult
+        // 趋势信号使用更宽的止损保护
+        float trend_mult = signal_type == "趋势追踪" ? 1.5 : 1.0
+        float fixed_distance = base_distance * trend_mult
+        
+        // 基于当前收盘价计算新止损位
+        float new_sl = close - fixed_distance
+        
+        // 核心跟踪逻辑：止损只能上移，不能下移
+        if new_sl > trail_sl
+            trail_sl := new_sl
+        
+        // [可选] 叠加结构性支撑（5日最低点）
+        if enable_struct_sl
+            float structure_stop = global_lowest_5 * 0.99
+            if structure_stop > trail_sl
+                trail_sl := structure_stop
+
+else if trade_state == STATE_SELL_PENDING
+    // 卖出待确认状态
+    bars_since_pending = bar_index - pending_bar
+    
+    if bars_since_pending > 3
+        // 超时，回到持仓
+        trade_state := STATE_HOLDING
+        pending_level := ""
+    else if bars_since_pending == 1
+        is_price_weak = high <= high[1] * 1.02
+        is_volume_weak = volume <= volume[1] * 1.3
+        is_bias_weak = bias <= bias[1] + 2.0
+        
+        if is_price_weak and is_volume_weak and is_bias_weak
+            // 确认卖出
+            plot_sell := true
+            sell_type := "高抛"  // [v6.1_fix3]
+            last_sell_idx := bar_index
+            trail_sl := na
+            entry_price := na
+            buy_level := ""
+            trade_state := STATE_IDLE
+        else
+            // 确认失败，继续持仓
+            trade_state := STATE_HOLDING
+        pending_level := ""
+
+// 状态派生变量（用于面板显示）
+bool is_in_market = (trade_state == STATE_HOLDING) or (trade_state == STATE_SELL_PENDING)
+bool buy_signal_pending = (trade_state == STATE_BUY_PENDING)
+bool sell_signal_pending = (trade_state == STATE_SELL_PENDING)
+string buy_signal_pending_level = (trade_state == STATE_BUY_PENDING) ? pending_level : ""
+string sell_signal_pending_type = (trade_state == STATE_SELL_PENDING) ? pending_level : ""
+
+// ==========================================
+// 11. 视觉绘制
+// ==========================================
+// [v6.1_fix3] 使用sell_type变量区分不同卖出类型
+is_sell_climax = plot_sell and (volume > vol_ma5 * 1.5) and sell_type == "高抛"
+is_sell_normal = plot_sell and sell_type == "高抛" and not is_sell_climax
+is_sell_sl     = plot_sell and sell_type == "止损"
+is_sell_trail  = plot_sell and sell_type == "跟踪止盈"
+is_sell_trend_break = plot_sell and sell_type == "趋势破坏"
+
+plot(show_ma ? ma5 : na, "MA5", color=color.new(#2196F3, 0), linewidth=1, display=display.pane)
+plot(show_ma ? ma20 : na, "MA20", color=color.new(#FF9800, 0), linewidth=1, display=display.pane)
+col_trend = is_trend_pass ? color.new(#E91E63, 0) : color.new(#4CAF50, 0)
+plot(show_ma ? (trend_mode == "MA250 (年线)" ? ma250 : ma120) : na, "趋势线", color=col_trend, linewidth=2, display=display.pane)
+
+p1 = plot(upper, "Upper", color=color.new(color.gray, 70), linewidth=1, display=display.pane)
+p2 = plot(lower, "Lower", color=color.new(color.gray, 70), linewidth=1, display=display.pane)
+fill(p1, p2, color=color.new(color.blue, 95))
+
+sl_style = sl_line_style == "实线" ? plot.style_line : (sl_line_style == "虚线" ? plot.style_linebr : (sl_line_style == "圆点" ? plot.style_circles : plot.style_cross))
+sl_width = sl_line_style == "实线" ? 2 : 1
+plot(show_ma and is_in_market and not na(trail_sl) ? trail_sl : na, "智能止损线", color=color.new(#E91E63, 0), style=sl_style, linewidth=sl_width, display=display.pane)
+
+col_buy_level1 = color.new(#C62828, 0)
+col_buy_level2 = color.new(#F44336, 0)
+col_buy_level3 = color.new(#FF7043, 0)
+col_sell_norm  = color.new(#388E3C, 0)
+col_sell_hard  = color.new(#1B5E20, 0)
+
+plotshape(buy_signal_pending and buy_signal_pending_level == "抢筹", "待确认-抢筹", shape.triangleup, location.belowbar, color.new(#FFA726, 0), 0, "待", color.white, size=size.small)
+plotshape(buy_signal_pending and buy_signal_pending_level == "建仓", "待确认-建仓", shape.triangleup, location.belowbar, color.new(#FFA726, 0), 0, "待", color.white, size=size.small)
+plotshape(sell_signal_pending, "卖出待确认", shape.triangledown, location.abovebar, color.new(#FFA726, 0), 0, "待", color.white, size=size.small)
+
+plotshape(plot_buy_level1, "抢筹", shape.labelup, location.belowbar, col_buy_level1, 0, "抢筹", color.white, size=size.normal)
+plotshape(plot_buy_level2, "建仓", shape.labelup, location.belowbar, col_buy_level2, 0, "建仓", color.white, size=size.small)
+plotshape(plot_buy_level3, "加仓", shape.triangleup, location.belowbar, col_buy_level3, 0, "加仓", color.white, size=size.tiny)
+
+plotshape(is_sell_normal, "高抛", shape.labeldown, location.abovebar, col_sell_norm, 0, "高抛", color.white, size=size.small)
+plotshape(is_sell_climax, "逃顶", shape.labeldown, location.abovebar, col_sell_hard, 0, "逃顶", color.white, size=size.small)
+plotshape(is_sell_sl, "止损", shape.xcross, location.abovebar, color.gray, 0, "止损", color.white, size=size.normal)
+// [v6.1_fix3] 新增跟踪止盈和趋势破坏的图标
+plotshape(is_sell_trail, "止盈", shape.labeldown, location.abovebar, color.new(#9C27B0, 0), 0, "止盈", color.white, size=size.small)
+plotshape(is_sell_trend_break, "破位", shape.xcross, location.abovebar, color.new(#FF5722, 0), 0, "破位", color.white, size=size.small)
+
+plotshape(enable_wyckoff and is_stopping_volume and not is_in_market, "VPA停止", shape.diamond, location.belowbar, color.yellow, 0, size=size.tiny)
+
+sell_bg = plot_sell 
+buy_bg = plot_buy_level1 or plot_buy_level2 or plot_buy_level3
+
+col_pattern_hammer = color.new(#00897B, 0)
+plotshape(show_pattern_labels and is_hammer and not buy_bg, "锤子线", shape.labelup, location.belowbar, col_pattern_hammer, 0, "锤子", color.white, size=size.tiny)
+plotshape(show_pattern_labels and is_limit_up, "涨停", shape.labeldown, location.abovebar, color.new(#D84315, 0), 0, "涨停", color.white, size=size.tiny)
+
+// [v6.1_fix2] 独立高位风险警示 - 不依赖持仓状态
+// 放量长上影线在相对高位时显示警告，即使没有持仓也会提示
+plotshape(show_pattern_labels and is_volume_shooting_sell and not plot_sell, "高位风险", shape.triangledown, location.abovebar, color.new(#FF5722, 0), 0, "⚠️", color.white, size=size.small)
+
+bgcolor(sell_bg ? color.new(col_sell_norm, 90) : (buy_bg ? color.new(color.red, 90) : na))
+
+// ==========================================
+// 12. 实战面板 (Analyst UI Clean)
+// ==========================================
+var table panel = table.new(position.top_right, 2, 45, border_width=2)
+
+if show_panel and barstate.islast
+    bool is_light = false
+    if panel_theme == "自适应"
+        is_light := color.r(chart.bg_color) > 150
+    else if panel_theme == "浅色"
+        is_light := true
+    else
+        is_light := false
+
+    color frame_col = is_light ? color.new(#E0E0E0, 0) : color.new(#424242, 0)
+    color bg_col = is_light ? color.new(#FFFFFF, 85) : color.new(#212121, 70)
+    color c_label = is_light ? color.new(#424242, 0) : color.new(#9E9E9E, 0)
+    color c_val = is_light ? color.new(#212121, 0) : color.new(#FFFFFF, 0)
+    color title_bg = strat_mode == "趋势追踪 (牛市/妖股)" ? color.new(#ff0000, 30) : (is_light ? color.new(#2196F3, 0) : color.new(#1565C0, 0))
+
+    table.set_frame_color(panel, frame_col)
+    table.set_bgcolor(panel, bg_col)
+
+    int row = 0
+    table.cell(panel, 0, row, "MFTS A-Share Ultimate", bgcolor=title_bg, text_color=#FFFFFF, text_size=size.small)
+    color mode_col = effective_is_trend_mode ? color.new(#ff0000, 30) : color.new(#2196F3, 30)
+    table.cell(panel, 1, row, effective_strat_mode_name, bgcolor=mode_col, text_color=#FFFFFF, text_size=size.small)
+
+    string sell_warning_txt = ""
+    color sell_warning_col = #9E9E9E
+    if sell_warning_yellow and is_in_market
+        sell_warning_txt := "🟡 减仓准备"
+        sell_warning_col := #FFC107
+    else if sell_warning_green and is_in_market
+        sell_warning_txt := "🟢 观察信号"
+        sell_warning_col := #8BC34A
+
+    string sig_txt = "观望"
+    color sig_bg   = color.new(#616161, 0)
+    if buy_signal_pending
+        sig_txt := "⏳ 待确认:" + buy_signal_pending_level
+        sig_bg  := color.new(#FFA726, 0)
+    else if sell_signal_pending
+        sig_txt := "⏳ 卖出待确认:" + sell_signal_pending_type
+        sig_bg  := color.new(#FFA726, 0)
+    else if plot_buy_level1
+        sig_txt := "🔴 抢筹信号"
+        sig_bg  := col_buy_level1
+    else if plot_buy_level2
+        // [v5.9新增] 区分趋势信号和均值回归信号
+        if signal_type == "趋势追踪"
+            sig_txt := "🚀 " + buy_level + "信号"
+            sig_bg  := color.new(#9C27B0, 0)  // 紫色表示趋势追踪
+        else
+            sig_txt := "🟠 建仓信号"
+            sig_bg  := col_buy_level2
+    else if plot_buy_level3
+        sig_txt := "🟡 加仓信号"
+        sig_bg  := col_buy_level3
+    else if is_sell_sl
+        sig_txt := "🛑 止损离场"
+        sig_bg  := #757575
+    else if is_sell_climax or is_sell_normal
+        sig_txt := "🔻 高抛离场"
+        sig_bg  := col_sell_norm
+    else if is_in_market
+        // [v5.9新增] 显示持仓类型
+        string hold_type = signal_type == "趋势追踪" ? "🚀" : "📊"
+        sig_txt := hold_type + " 持仓中 (" + buy_level + ")"
+        sig_bg  := signal_type == "趋势追踪" ? color.new(#9C27B0, 0) : #2196F3
+    else if buy_level1_warning
+        sig_txt := "🟢 抢筹预警"
+        sig_bg  := color.new(#8BC34A, 0)
+    else if buy_level2_warning
+        sig_txt := "🟢 建仓预警"
+        sig_bg  := color.new(#8BC34A, 0)
+    // [v5.9新增] 趋势买入预警
+    else if trend_buy_signal
+        sig_txt := "🟣 趋势预警:" + trend_buy_type
+        sig_bg  := color.new(#9C27B0, 30)
+
+    if compact_panel
+        row += 1
+        table.cell(panel, 0, row, "Z-Score", text_color=c_label, text_size=size.small)
+        string z_display = str.tostring(z_score, "#.##")
+        color z_color = z_score < z_buy_deep ? col_buy_level1 : (z_score < z_buy_mid ? col_buy_level2 : c_val)
+        table.cell(panel, 1, row, z_display, text_color=z_color, text_size=size.small)
+        
+        row += 1
+        table.cell(panel, 0, row, "Alpha得分", text_color=c_label, text_size=size.small)
+        string score_txt = str.tostring(voting_score, "#.#") + " / " + str.tostring(pass_score_threshold, "#.#")
+        color score_col = voting_score >= pass_score_threshold ? #F44336 : #9E9E9E
+        table.cell(panel, 1, row, score_txt, text_color=score_col, text_size=size.small)
+        
+    else
+        row += 1
+        table.cell(panel, 0, row, "市场", text_color=c_label, text_size=size.small)
+        string mkt_display = mkt_name + (risk_label != "" ? " " + risk_label : "")
+        if enable_strict_limit
+            mkt_display += " 🔒严格风控"
+        table.cell(panel, 1, row, mkt_display, text_color=#FFA726, text_size=size.small)
+        
+        row += 1
+        table.cell(panel, 0, row, "基准指数", text_color=c_label, text_size=size.small)
+        string benchmark_display = target_index_name
+        table.cell(panel, 1, row, benchmark_display, text_color=#FFA726, text_size=size.small)
+        
+        row += 1
+        table.cell(panel, 0, row, "个股趋势", text_color=c_label, text_size=size.small)
+        string t_stat = is_trend_pass ? "✅ 顺势" : "❌ 逆势"
+        color t_col   = is_trend_pass ? #4CAF50 : #F44336
+        table.cell(panel, 1, row, t_stat, text_color=t_col, text_size=size.small)
+        
+        row += 1
+        table.cell(panel, 0, row, "Z-Score(σ)", text_color=c_label, text_size=size.small)
+        string z_display = str.tostring(z_score, "#.##")
+        color z_color = z_score < z_buy_deep ? col_buy_level1 : (z_score < z_buy_mid ? col_buy_level2 : c_val)
+        table.cell(panel, 1, row, z_display, text_color=z_color, text_size=size.small)
+        
+        row += 1
+        table.cell(panel, 0, row, "流动性/活跃", text_color=c_label, text_size=size.small)
+        string liq_txt = liquidity_level + activity_status
+        color liq_col = liquidity_ok ? #4CAF50 : #F44336
+        table.cell(panel, 1, row, liq_txt, text_color=liq_col, text_size=size.small)
+        
+        // [v5.7新增] VWAP偏离度显示
+        row += 1
+        table.cell(panel, 0, row, "VWAP偏离", text_color=c_label, text_size=size.small)
+        string vwap_txt = str.tostring(vwap_dev, "#.#") + "%"
+        color vwap_col = is_below_vwap ? #4CAF50 : #F44336
+        table.cell(panel, 1, row, vwap_txt, text_color=vwap_col, text_size=size.small)
+        
+        // [v5.7新增] 成交额分位数显示
+        row += 1
+        table.cell(panel, 0, row, "成交额分位", text_color=c_label, text_size=size.small)
+        string vol_pct_txt = str.tostring(turnover_percentile, "#.0") + "%位"
+        color vol_pct_col = turnover_percentile > 90 ? #F44336 : (turnover_percentile < 20 ? #9E9E9E : c_val)
+        table.cell(panel, 1, row, vol_pct_txt, text_color=vol_pct_col, text_size=size.small)
+
+        row += 1
+        table.cell(panel, 0, row, "顶部背离", text_color=c_label, text_size=size.small)
+        color div_col = divergence_strength >= 9 ? #C62828 : (divergence_strength >= 7 ? #F44336 : (divergence_strength >= 5 ? #FF9800 : (divergence_strength >= 3 ? #FFA726 : #9E9E9E)))
+        table.cell(panel, 1, row, divergence_level, text_color=div_col, text_size=size.small)
+
+    row += 1
+    table.cell(panel, 0, row, "交易权限", text_color=c_label, text_size=size.small)
+    string t1_status = is_t1 ? "允许卖出" : "T+0无限"
+    color t1_col     = #4CAF50
+    if is_t0_forbidden and is_in_market
+        t1_status := "🔒 T+1锁仓"
+        t1_col    := #F44336
+    table.cell(panel, 1, row, t1_status, text_color=t1_col, text_size=size.small)
+    
+    row += 1
+    table.cell(panel, 0, row, "当前信号", text_color=c_val, text_size=size.small)
+    table.cell(panel, 1, row, sig_txt, bgcolor=sig_bg, text_color=c_val, text_size=size.small)
+
+    if sell_warning_txt != "" and is_in_market
+        row += 1
+        table.cell(panel, 0, row, "卖出预警", text_color=c_label, text_size=size.small)
+        table.cell(panel, 1, row, sell_warning_txt, text_color=sell_warning_col, text_size=size.small)
+        
+    if enable_wyckoff and not compact_panel
+        row += 1
+        table.cell(panel, 0, row, "VPA 状态", text_color=c_label, text_size=size.small)
+        string vpa_txt = is_stopping_volume ? "🛑 停止量 (底)" : (is_effort_no_result_bear ? "⚠️ 努力无果" : (is_buying_climax ? "🔥 抢购高潮" : "---"))
+        color vpa_col = is_stopping_volume ? #4CAF50 : (is_buying_climax ? #F44336 : c_val)
+        table.cell(panel, 1, row, vpa_txt, text_color=vpa_col, text_size=size.small)
+
+// ==========================================
+// 13. 警报条件
+// ==========================================
+alertcondition(plot_buy_level1 or plot_buy_level2 or plot_buy_level3, "MFTS买入", "买点信号触发")
+alertcondition(buy_signal_pending, "MFTS买入预警", "买入信号待确认")
+alertcondition(sell_signal_pending, "MFTS卖出预确认", "卖出信号待确认 - 防止牛市卖飞")
+alertcondition(plot_sell, "MFTS卖出", "卖点信号触发 - 完全清仓")
+alertcondition(sell_warning_yellow, "MFTS卖出预警", "技术指标转弱，准备减仓")
+alertcondition(divergence_strength >= 7, "MFTS严重背离", "检测到严重量价背离，高风险预警")

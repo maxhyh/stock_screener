@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stock-screener.local/schemas/promotion_decision.schema.json",
+  "title": "Promotion Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "review_id",
+    "expected_current_default_profile",
+    "final_default_profile",
+    "candidate_profile",
+    "decision",
+    "change_required",
+    "reason_code",
+    "rationale",
+    "evidence",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 10
+    },
+    "review_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_current_default_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "final_default_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_profile": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["keep", "promote"]
+    },
+    "change_required": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "review_empty",
+        "current_main_profile_remains_best",
+        "candidate_p2_gate_failed",
+        "candidate_hard_gate_failed",
+        "candidate_execution_underperformed",
+        "insufficient_edge_or_execution_evidence",
+        "candidate_outperformed_with_sufficient_p2_support"
+      ]
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "main_score",
+        "candidate_score",
+        "score_margin",
+        "candidate_p2_executed_days_total",
+        "min_p2_executed_days",
+        "candidate_p2_gate_passed",
+        "candidate_promotion_hard_gate_passed",
+        "candidate_execution_parity_passed"
+      ],
+      "properties": {
+        "main_score": { "type": "number" },
+        "candidate_score": { "type": "number" },
+        "score_margin": { "type": "number" },
+        "candidate_p2_executed_days_total": { "type": "integer", "minimum": 0 },
+        "min_p2_executed_days": { "type": "integer", "minimum": 1 },
+        "candidate_p2_gate_passed": { "type": "boolean" },
+        "candidate_promotion_hard_gate_passed": { "type": "boolean" },
+        "candidate_execution_parity_passed": { "type": "boolean" }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_csv", "review_meta_json"],
+      "properties": {
+        "review_csv": { "type": "string", "minLength": 1 },
+        "review_meta_json": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

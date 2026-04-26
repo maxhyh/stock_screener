@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 今日推荐{% endblock %}
+{% block page_kicker %}Daily Selection Desk{% endblock %}
+{% block page_title %}今日推荐工作台{% endblock %}
+{% block page_subtitle %}面向交易前的快速决策页，只保留今日推荐、历史表现摘要和最关键的信号字段，不把研究层噪音带进日常执行。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <button id="reloadMl" class="button">刷新推荐</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Daily Brief</div>
+                <h2 id="mlHeroTitle">正在加载最新 ML 推荐...</h2>
+                <p id="mlHeroCopy" class="hero-copy">系统将读取最新日选股结果，并叠加历史验证统计帮助判断今天的执行强度。</p>
+                <div id="mlHeroChips" class="chip-row"></div>
+            </div>
+            <div id="mlHeroMetrics" class="hero-metrics">
+                <div class="glass-card"><div class="status-title">推荐数量</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">历史胜率</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">平均收益</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">Top10 胜率</div><div class="status-value">--</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="metric-grid" id="mlMetricGrid">
+        <article class="metric-card"><div class="metric-label">推荐数量</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">最新日期</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">历史胜率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">平均收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Top Picks</div>
+                    <h3 class="panel-title">推荐评分排序</h3>
+                    <p class="panel-copy">前 12 名候选的模型评分或概率排序，方便快速感知今天 alpha 集中的程度。</p>
+                </div>
+            </div>
+            <div id="mlScoreChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Recent Track Record</div>
+                    <h3 class="panel-title">最近 10 个验证窗口</h3>
+                    <p class="panel-copy">用历史摘要校正当日信心，避免因为单日推荐看起来漂亮就过度加仓。</p>
+                </div>
+            </div>
+            <div id="mlTrackRecordChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Daily Picks</div>
+                <h3 class="panel-title">推荐明细</h3>
+                <p class="panel-copy">保留评分、价格、涨跌、RSI、量比等最常用字段，专注于执行前的最后一眼检查。</p>
+            </div>
+            <div class="table-meta" id="mlTableMeta">--</div>
+        </div>
+        <div id="mlResultsTable"></div>
+    </section>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/ml_daily.js') }}"></script>
+{% endblock %}

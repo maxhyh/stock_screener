@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 平台运维{% endblock %}
+{% block page_kicker %}Platform Operations{% endblock %}
+{% block page_title %}平台运维与风险暴露{% endblock %}
+{% block page_subtitle %}这页不讨论选股好不好看，而是判断系统是否稳定、执行是否一致、容量是否健康、风险暴露是否失控。它更像量化平台的值班台。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <button id="reloadOps" class="button">刷新运维视图</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Ops Snapshot</div>
+                <h2 id="opsHeroTitle">正在读取平台运行态...</h2>
+                <p id="opsHeroCopy" class="hero-copy">这里会同时汇总最新运行、实验注册、执行一致性、前置风控对齐、组合暴露与容量压力。</p>
+                <div id="opsHeroChips" class="chip-row"></div>
+            </div>
+            <div id="opsHeroMetrics" class="hero-metrics">
+                <div class="glass-card"><div class="status-title">最新 Run</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">实验数</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">一致性</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">风险拦截率</div><div class="status-value">--</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Platform Alerts</div>
+                <h3 class="panel-title">平台告警摘要</h3>
+                <p class="panel-copy">先看异常，再决定要不要下钻到执行一致性、风控对齐、暴露或容量压力。</p>
+            </div>
+        </div>
+        <div id="opsAlerts"></div>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Profile Promotion Gate</div>
+                <h3 class="panel-title">档位晋升治理</h3>
+                <p class="panel-copy">这里展示最新的主档挑战结论。默认档位是否允许切换，不再靠主观判断，而是看研究证据、P2 replay 和正式决策文件。</p>
+            </div>
+        </div>
+        <div id="promotionGatePanel"></div>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Promotion Trend</div>
+                    <h3 class="panel-title">主档挑战趋势</h3>
+                    <p class="panel-copy">重点看挑战分差、执行分和是否进入待晋升状态，判断候选档是在逼近主档，还是被执行层反复打回。</p>
+                </div>
+            </div>
+            <div id="promotionTrendChart" class="chart-surface compact"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Promotion History</div>
+                    <h3 class="panel-title">最近治理快照</h3>
+                    <p class="panel-copy">保留最近几次主档挑战决策，便于判断是否长期 shadow、是否接近 promotion，还是已经明显失效。</p>
+                </div>
+            </div>
+            <div id="promotionHistoryTable"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Alert Trend</div>
+                    <h3 class="panel-title">告警趋势</h3>
+                    <p class="panel-copy">看总告警数和严重告警是不是在持续恶化，而不是只盯单次快照。</p>
+                </div>
+            </div>
+            <div id="opsAlertTrendChart" class="chart-surface compact"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Alert History</div>
+                    <h3 class="panel-title">最近告警快照</h3>
+                    <p class="panel-copy">保留最近几次告警摘要，帮助判断是瞬时异常还是持续性退化。</p>
+                </div>
+            </div>
+            <div id="opsAlertHistoryTable"></div>
+        </article>
+    </section>
+
+    <section class="metric-grid" id="opsMetricGrid">
+        <article class="metric-card"><div class="metric-label">最新 Run</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">实验注册</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">收益偏差</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">风控拦截率</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Industry Exposure</div>
+                    <h3 class="panel-title">行业暴露 Top</h3>
+                    <p class="panel-copy">用平均权重排名观察组合长期暴露是否过度集中，而不是只看单日行业分散度。</p>
+                </div>
+            </div>
+            <div id="industryExposureChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Capacity Pressure</div>
+                    <h3 class="panel-title">容量压力与参与率</h3>
+                    <p class="panel-copy">如果参与率和容量倍数失真，再漂亮的组合收益也很难真实落地。</p>
+                </div>
+            </div>
+            <div id="capacityChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Execution Consistency</div>
+                    <h3 class="panel-title">执行一致性摘要</h3>
+                    <p class="panel-copy">这里用于检查回测预期、执行结果、订单阻塞和风控拦截之间是否出现系统性偏差。</p>
+                </div>
+            </div>
+            <div id="consistencyPanel"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Pretrade Alignment</div>
+                    <h3 class="panel-title">前置风控对齐</h3>
+                    <p class="panel-copy">帮助判断信号侧和执行侧的风控口径是否在持续收敛，还是仍存在大幅漂移。</p>
+                </div>
+            </div>
+            <div id="alignmentPanel"></div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Exposure Summary</div>
+                    <h3 class="panel-title">组合暴露摘要</h3>
+                    <p class="panel-copy">用于观察不同状态下的平均暴露、持仓数、胜率和 HHI 集中度。</p>
+                </div>
+            </div>
+            <div id="exposureTable"></div>
+        </article>
+        <article class="table-card">
+            <div class="table-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Experiments</div>
+                    <h3 class="panel-title">最近实验登记</h3>
+                    <p class="panel-copy">模型和实验不应只存在于文件名里，这里保留最近实验的轻量登记视图。</p>
+                </div>
+            </div>
+            <div id="experimentTable"></div>
+        </article>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Capacity Records</div>
+                <h3 class="panel-title">最近容量记录</h3>
+                <p class="panel-copy">重点看参与率、容量倍数和成本压力，及时识别“回测能做、真实未必能做”的区间。</p>
+            </div>
+        </div>
+        <div id="capacityTable"></div>
+    </section>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/platform_ops.js') }}"></script>
+{% endblock %}

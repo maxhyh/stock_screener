@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}MFTS Quant Platform | 回测研究{% endblock %}
+{% block page_kicker %}Backtest Research{% endblock %}
+{% block page_title %}历史回测研究页{% endblock %}
+{% block page_subtitle %}回测页关注样本规模、不同持有周期的胜率与收益、以及信号命中分布，目的是判断策略结构，而不是只看单个漂亮指标。{% endblock %}
+
+{% block page_actions %}
+    <div class="toolbar">
+        <button id="reloadBacktest" class="button">刷新回测</button>
+    </div>
+{% endblock %}
+
+{% block content %}
+    <section class="hero-panel">
+        <div class="hero-grid">
+            <div class="hero-headline">
+                <div class="section-kicker">Research Snapshot</div>
+                <h2 id="backtestHeroTitle">正在加载 MFTS 历史回测...</h2>
+                <p id="backtestHeroCopy" class="hero-copy">这里优先看样本深度、命中率和多持有周期的收益轮廓，避免只盯年化数字做错误判断。</p>
+                <div id="backtestHeroChips" class="chip-row"></div>
+            </div>
+            <div id="backtestHeroMetrics" class="hero-metrics">
+                <div class="glass-card"><div class="status-title">样本天数</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">平均选股数</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+1 胜率</div><div class="status-value">--</div></div>
+                <div class="glass-card"><div class="status-title">T+10 胜率</div><div class="status-value">--</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="metric-grid" id="backtestMetricGrid">
+        <article class="metric-card"><div class="metric-label">回测天数</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">平均选股数</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+1 平均收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+        <article class="metric-card"><div class="metric-label">T+5 平均收益</div><div class="metric-value">--</div><div class="metric-detail">--</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Win Rate Curve</div>
+                    <h3 class="panel-title">多持有周期胜率</h3>
+                    <p class="panel-copy">观察 T+1、T+5、T+10 胜率在时间轴上的一致性，判断策略收益是否依赖更长持有。</p>
+                </div>
+            </div>
+            <div id="backtestWinChart" class="chart-surface"></div>
+        </article>
+        <article class="chart-card">
+            <div class="panel-head">
+                <div class="panel-title-wrap">
+                    <div class="panel-label">Return Distribution</div>
+                    <h3 class="panel-title">多持有周期平均收益</h3>
+                    <p class="panel-copy">收益曲线能帮助识别“短线抢反弹”还是“中线持有更占优”的策略偏好。</p>
+                </div>
+            </div>
+            <div id="backtestReturnChart" class="chart-surface"></div>
+        </article>
+    </section>
+
+    <section class="table-card">
+        <div class="table-head">
+            <div class="panel-title-wrap">
+                <div class="panel-label">Research Log</div>
+                <h3 class="panel-title">回测明细</h3>
+                <p class="panel-copy">结合日度样本量和多周期结果，检查回测结论是否来自稳定样本，而不是少数极端日期。</p>
+            </div>
+            <div class="table-meta" id="backtestTableMeta">--</div>
+        </div>
+        <div id="backtestTable"></div>
+    </section>
+
+{% endblock %}
+
+{% block page_scripts %}
+    <script defer src="{{ url_for('static', filename='pages/backtest.js') }}"></script>
+{% endblock %}

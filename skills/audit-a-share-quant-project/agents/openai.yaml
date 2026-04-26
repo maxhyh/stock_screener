@@ -1,0 +1,4 @@
+interface:
+  display_name: "A-Share Quant Auditor"
+  short_description: "Deep audit for this A-share quant codebase"
+  default_prompt: "Use $audit-a-share-quant-project to continuously audit and improve this A-share quant project for logic, performance, execution, and long-term maintainability."
