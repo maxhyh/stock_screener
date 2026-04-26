@@ -179,6 +179,11 @@ def _summarize_p2_ledgers(profiles: list[str], ledgers: list[Path], min_days: in
 
     out_rows: list[dict[str, object]] = []
     for profile, g in detail_df.groupby("profile"):
+        def _num_col(name: str) -> pd.Series:
+            if name in g.columns:
+                return pd.to_numeric(g[name], errors="coerce").fillna(0.0)
+            return pd.Series([0.0] * len(g), index=g.index, dtype=float)
+
         out_rows.append(
             {
                 "profile": str(profile),
@@ -191,6 +196,12 @@ def _summarize_p2_ledgers(profiles: list[str], ledgers: list[Path], min_days: in
                 "p2_risk_block_rate_mean": float(pd.to_numeric(g["risk_block_rate_pct"], errors="coerce").mean()),
                 "p2_style_hit_rate_mean": float(pd.to_numeric(g["style_hit_rate_pct"], errors="coerce").mean()),
                 "p2_target_weight_sum_mean": float(pd.to_numeric(g["target_weight_sum_mean"], errors="coerce").mean()),
+                "p2_target_weight_source_external_rate_pct": float(_num_col("target_weight_source_external_rate_pct").mean()),
+                "p2_target_weight_checksum_coverage_pct": float(_num_col("target_weight_checksum_coverage_pct").mean()),
+                "p2_entry_not_tradable_orders_sum": float(_num_col("entry_not_tradable_orders").sum()),
+                "p2_exit_not_tradable_orders_sum": float(_num_col("exit_not_tradable_orders").sum()),
+                "p2_blocked_target_weight_sum": float(_num_col("blocked_target_weight_sum").sum()),
+                "p2_max_daily_tradability_blocked_orders": float(_num_col("max_daily_tradability_blocked_orders").max()),
                 "p2_objective_mean": float(pd.to_numeric(g["objective_score"], errors="coerce").mean()),
             }
         )
@@ -303,6 +314,16 @@ def _load_or_build_p2_summary(
             if not df.empty:
                 if "target_weight_sum_mean" not in df.columns:
                     df["target_weight_sum_mean"] = float("nan")
+                for c in [
+                    "target_weight_source_external_rate_pct",
+                    "target_weight_checksum_coverage_pct",
+                    "entry_not_tradable_orders",
+                    "exit_not_tradable_orders",
+                    "blocked_target_weight_sum",
+                    "max_daily_tradability_blocked_orders",
+                ]:
+                    if c not in df.columns:
+                        df[c] = 0.0
                 agg = (
                     df.groupby("profile", dropna=False)
                     .agg(
@@ -315,6 +336,12 @@ def _load_or_build_p2_summary(
                         p2_risk_block_rate_mean=("risk_block_rate_pct", "mean"),
                         p2_style_hit_rate_mean=("style_hit_rate_pct", "mean"),
                         p2_target_weight_sum_mean=("target_weight_sum_mean", "mean"),
+                        p2_target_weight_source_external_rate_pct=("target_weight_source_external_rate_pct", "mean"),
+                        p2_target_weight_checksum_coverage_pct=("target_weight_checksum_coverage_pct", "mean"),
+                        p2_entry_not_tradable_orders_sum=("entry_not_tradable_orders", "sum"),
+                        p2_exit_not_tradable_orders_sum=("exit_not_tradable_orders", "sum"),
+                        p2_blocked_target_weight_sum=("blocked_target_weight_sum", "sum"),
+                        p2_max_daily_tradability_blocked_orders=("max_daily_tradability_blocked_orders", "max"),
                         p2_objective_mean=("objective_score", "mean"),
                     )
                     .reset_index()
@@ -394,6 +421,12 @@ def _build_promotion_review(
         "p2_target_weight_sum_60",
         "p2_target_weight_sum_90",
         "p2_target_weight_sum_120",
+        "p2_target_weight_source_external_rate_pct",
+        "p2_target_weight_checksum_coverage_pct",
+        "p2_entry_not_tradable_orders_sum",
+        "p2_exit_not_tradable_orders_sum",
+        "p2_blocked_target_weight_sum",
+        "p2_max_daily_tradability_blocked_orders",
     ]:
         if c not in df.columns:
             df[c] = float("nan") if c.startswith("p2_target_weight_sum") else 0.0
@@ -469,6 +502,12 @@ def _build_promotion_review(
         else float("nan")
     )
     main_shadow_days = _safe_float(main_row["shadow_executed_days_total"].iloc[0], float("nan")) if not main_row.empty else float("nan")
+    main_tradability_blocked_orders = (
+        _safe_float(main_row["p2_entry_not_tradable_orders_sum"].iloc[0], 0.0)
+        + _safe_float(main_row["p2_exit_not_tradable_orders_sum"].iloc[0], 0.0)
+        if not main_row.empty
+        else 0.0
+    )
 
     hard_gate_pass: list[int] = []
     hard_gate_reasons: list[str] = []
@@ -499,6 +538,18 @@ def _build_promotion_review(
         target_w_60 = _safe_float(row.get("p2_target_weight_sum_60", float("nan")), float("nan"))
         if pd.notna(target_w_60) and target_w_60 < 0.24 - 1e-12:
             reasons.append("target_weight_sum_60_too_low")
+        if _safe_float(row.get("p2_target_weight_source_external_rate_pct", 0.0), 0.0) < 100.0 - 1e-12:
+            reasons.append("target_weight_source_not_external")
+        if _safe_float(row.get("p2_target_weight_checksum_coverage_pct", 0.0), 0.0) < 100.0 - 1e-12:
+            reasons.append("target_weight_checksum_missing")
+        tradability_blocked_orders = _safe_float(row.get("p2_entry_not_tradable_orders_sum", 0.0), 0.0) + _safe_float(
+            row.get("p2_exit_not_tradable_orders_sum", 0.0),
+            0.0,
+        )
+        if main_tradability_blocked_orders > 0 and tradability_blocked_orders > main_tradability_blocked_orders + 1e-12:
+            reasons.append("tradability_blocked_orders_worse_than_main")
+        if _safe_float(row.get("p2_max_daily_tradability_blocked_orders", 0.0), 0.0) > 10.0 + 1e-12:
+            reasons.append("tradability_block_cluster_hard_cap_failed")
         if int(_safe_float(row.get("shadow_evidence_available", 0.0))) > 0:
             shadow_days = _safe_float(row.get("shadow_executed_days_total", float("nan")), float("nan"))
             if pd.notna(shadow_days) and pd.notna(main_shadow_days) and shadow_days < min(20.0, main_shadow_days):
@@ -698,6 +749,18 @@ def _build_promotion_decision(
             ),
             "winner_shadow_mean_top_industry_nav_weight_pct": _safe_float(top.get("shadow_mean_top_industry_nav_weight_pct", 0.0)),
             "winner_p2_target_weight_sum_mean": _safe_float(top.get("p2_target_weight_sum_mean", 0.0)),
+            "winner_p2_target_weight_source_external_rate_pct": _safe_float(
+                top.get("p2_target_weight_source_external_rate_pct", 0.0)
+            ),
+            "winner_p2_target_weight_checksum_coverage_pct": _safe_float(
+                top.get("p2_target_weight_checksum_coverage_pct", 0.0)
+            ),
+            "winner_p2_entry_not_tradable_orders_sum": _safe_float(top.get("p2_entry_not_tradable_orders_sum", 0.0)),
+            "winner_p2_exit_not_tradable_orders_sum": _safe_float(top.get("p2_exit_not_tradable_orders_sum", 0.0)),
+            "winner_p2_blocked_target_weight_sum": _safe_float(top.get("p2_blocked_target_weight_sum", 0.0)),
+            "winner_p2_max_daily_tradability_blocked_orders": _safe_float(
+                top.get("p2_max_daily_tradability_blocked_orders", 0.0)
+            ),
             "winner_p2_nav_not_below_main_windows": _safe_int(top.get("p2_nav_not_below_main_windows", 0)),
             "winner_p2_mdd_not_worse_than_main_windows": _safe_int(top.get("p2_mdd_not_worse_than_main_windows", 0)),
             "winner_shadow_mean_industry_hhi": _safe_float(top.get("shadow_mean_industry_hhi", 0.0)),

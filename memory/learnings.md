@@ -4,6 +4,15 @@ Append durable research, execution, and governance learnings here. Keep entries 
 
 ## Learnings Log
 
+### 2026-04-26 | Promotion needs target-weight source and checksum evidence
+- tags: promotion, checksum, target_weight, p2
+- reusable: yes
+- confidence: high
+- evidence: Added `target_weight_checksum`, `target_weight_source_external_rate_pct`, and checksum coverage into P2 rolling summaries and promotion hard gates.
+- action: Reject candidates whose P2 ledger did not use external optimizer weights or whose target-weight checksum coverage is incomplete.
+
+Target-weight consistency must be a first-class promotion artifact, not an informal assumption.
+
 ### 2026-04-26 | P2 execution evidence must use the canonical broker path
 - tags: p2, target_weight, execution, promotion
 - reusable: yes

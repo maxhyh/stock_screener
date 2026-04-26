@@ -33,7 +33,7 @@ from utils.market_regime import detect_market_regime
 from utils.metadata_guard import evaluate_metadata_guard, load_metadata_health
 from utils.execution_overlay import add_execution_overlay_scores
 from utils.output_paths import ensure_output_dirs, write_dual_csv
-from utils.portfolio_weights import build_score_weights
+from utils.portfolio_weights import build_score_weights, build_target_weight_checksum
 from utils.signal_refactor import add_feature_refactor_columns
 from utils.signal_quality import add_signal_quality_columns
 
@@ -991,12 +991,16 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     if model_h and model_h != profile_h and not use_model_h:
         print(f"⚠️ 模型标签持有期={model_h} 与 default_profile={profile_h} 不一致，已按平台口径输出 {profile_h}")
     result['建议持有天数'] = int(max(1, suggest_h))
+    target_weight_checksum = build_target_weight_checksum(zip(result["代码"], result["target_weight"]))
+    result["target_weight_source"] = "portfolio_optimizer"
+    result["target_weight_checksum"] = target_weight_checksum
     
     # 重新排列列
     result = result[['日期', '市场状态', '建议仓位', '单票上限', '建议持有天数', '排名', '代码', '名称', '收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                      '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'target_weight', 'target_weight_raw',
                      'participation_pct', 'impact_cost_bps', 'unfilled_target_weight', 'industry_weight_post',
-                     'constraint_reason', 'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']]
+                     'constraint_reason', 'target_weight_source', 'target_weight_checksum',
+                     'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']]
     
     # 保留两位小数
     float_cols = ['收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分', '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20',
@@ -1039,6 +1043,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "pretrade": dict(signal_risk_info),
         "topn_pretrade_eval": dict(topn_pretrade_eval),
         "optimizer": dict(optimizer_info),
+        "target_weight_checksum": str(target_weight_checksum),
     }
     summary_file = risk_dir / f"signal_pretrade_summary_{date_str}.json"
     summary_latest_file = risk_dir / "signal_pretrade_summary_latest.json"

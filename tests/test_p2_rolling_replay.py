@@ -51,6 +51,13 @@ def test_summarize_ledger_basic_metrics(tmp_path: Path):
                 "risk_style_beta_limits_hit": [1, 1],
                 "risk_style_momentum_limits_hit": [1, 1],
                 "risk_style_vol_limits_hit": [0, 1],
+                "target_weight_source": ["external_target_weight", "external_target_weight"],
+                "target_weight_checksum": ["abc", "def"],
+                "entry_not_tradable_orders": [1, 3],
+                "exit_not_tradable_orders": [0, 2],
+                "blocked_target_weight": [0.03, 0.07],
+                "entry_not_tradable_target_weight": [0.03, 0.05],
+                "exit_not_tradable_target_weight": [0.0, 0.02],
             }
         )
     ledger_file = tmp_path / "ledger.csv"
@@ -64,6 +71,12 @@ def test_summarize_ledger_basic_metrics(tmp_path: Path):
     assert round(float(s["risk_block_rate_pct"]), 2) == 16.67
     assert float(s["style_hit_total"]) == 4.0
     assert round(float(s["style_hit_rate_pct"]), 2) == 22.22
+    assert float(s["target_weight_source_external_rate_pct"]) == 100.0
+    assert float(s["target_weight_checksum_coverage_pct"]) == 100.0
+    assert float(s["entry_not_tradable_orders"]) == 4.0
+    assert float(s["exit_not_tradable_orders"]) == 2.0
+    assert round(float(s["blocked_target_weight_sum"]), 2) == 0.10
+    assert float(s["max_daily_tradability_blocked_orders"]) == 5.0
 
 
 def test_main_passes_metadata_gate_overrides(monkeypatch, tmp_path: Path):

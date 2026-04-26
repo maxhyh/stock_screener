@@ -1072,6 +1072,16 @@ def main() -> int:
     _write_csv(risk_file, risk_block_df)
 
     ledger_row = dict(result.ledger_row)
+    blocked_or_rejected = orders_df["status"].isin(["blocked", "rejected"]) if "status" in orders_df.columns else pd.Series(dtype=bool)
+    reasons = orders_df.get("reason", pd.Series(dtype=object)).astype(str) if not orders_df.empty else pd.Series(dtype=str)
+    sides = orders_df.get("side", pd.Series(dtype=object)).astype(str) if not orders_df.empty else pd.Series(dtype=str)
+    weights = (
+        pd.to_numeric(orders_df.get("target_weight", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        if not orders_df.empty
+        else pd.Series(dtype=float)
+    )
+    entry_block = blocked_or_rejected & sides.eq("BUY") & reasons.eq("entry_not_tradable")
+    exit_block = blocked_or_rejected & sides.eq("SELL") & reasons.eq("exit_not_tradable")
     ledger_row["dry_run"] = int(bool(args.dry_run))
     ledger_row["broker"] = broker_name
     ledger_row["channel"] = channel
@@ -1092,6 +1102,11 @@ def main() -> int:
     ledger_row["used_recommendation"] = int(bool(rec_info))
     ledger_row["recommend_rank"] = int(rec_info.get("recommend_rank", 0)) if rec_info else 0
     ledger_row["recommend_risk_tier"] = str(rec_info.get("risk_tier", "")) if rec_info else ""
+    ledger_row["entry_not_tradable_orders"] = int(entry_block.sum()) if len(entry_block) else 0
+    ledger_row["exit_not_tradable_orders"] = int(exit_block.sum()) if len(exit_block) else 0
+    ledger_row["blocked_target_weight"] = float(weights.loc[blocked_or_rejected].sum()) if len(weights) else 0.0
+    ledger_row["entry_not_tradable_target_weight"] = float(weights.loc[entry_block].sum()) if len(weights) else 0.0
+    ledger_row["exit_not_tradable_target_weight"] = float(weights.loc[exit_block].sum()) if len(weights) else 0.0
     if ledger_file.exists():
         old = pd.read_csv(ledger_file)
         ledger_df = pd.concat([old, pd.DataFrame([ledger_row])], ignore_index=True)

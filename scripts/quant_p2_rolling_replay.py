@@ -169,6 +169,14 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "filled_orders": 0.0,
             "blocked_orders": 0.0,
             "rejected_orders": 0.0,
+            "target_weight_source_external_rate_pct": 0.0,
+            "target_weight_checksum_coverage_pct": 0.0,
+            "entry_not_tradable_orders": 0.0,
+            "exit_not_tradable_orders": 0.0,
+            "blocked_target_weight_sum": 0.0,
+            "entry_not_tradable_target_weight_sum": 0.0,
+            "exit_not_tradable_target_weight_sum": 0.0,
+            "max_daily_tradability_blocked_orders": 0.0,
         }
     df = pd.read_csv(ledger_file)
     if df.empty:
@@ -187,6 +195,14 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "filled_orders": 0.0,
             "blocked_orders": 0.0,
             "rejected_orders": 0.0,
+            "target_weight_source_external_rate_pct": 0.0,
+            "target_weight_checksum_coverage_pct": 0.0,
+            "entry_not_tradable_orders": 0.0,
+            "exit_not_tradable_orders": 0.0,
+            "blocked_target_weight_sum": 0.0,
+            "entry_not_tradable_target_weight_sum": 0.0,
+            "exit_not_tradable_target_weight_sum": 0.0,
+            "max_daily_tradability_blocked_orders": 0.0,
         }
 
     for c in [
@@ -208,6 +224,11 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "unfilled_target_weight",
         "impact_cost_bps_mean",
         "max_participation_pct",
+        "entry_not_tradable_orders",
+        "exit_not_tradable_orders",
+        "blocked_target_weight",
+        "entry_not_tradable_target_weight",
+        "exit_not_tradable_target_weight",
     ]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -235,6 +256,13 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
 
     turnover_sum = float(df["turnover"].sum())
     turnover_mean = float(df["turnover"].mean()) if len(df) else 0.0
+    target_weight_source = df.get("target_weight_source", pd.Series([""] * len(df), index=df.index)).astype(str)
+    target_weight_checksum = df.get("target_weight_checksum", pd.Series([""] * len(df), index=df.index)).astype(str)
+    external_rate = float(target_weight_source.eq("external_target_weight").mean() * 100.0) if len(df) else 0.0
+    checksum_coverage = float(target_weight_checksum.str.strip().ne("").mean() * 100.0) if len(df) else 0.0
+    entry_not_tradable = float(df["entry_not_tradable_orders"].sum())
+    exit_not_tradable = float(df["exit_not_tradable_orders"].sum())
+    daily_tradability_blocked = df["entry_not_tradable_orders"] + df["exit_not_tradable_orders"]
 
     return {
         "executed_days": int(len(df)),
@@ -258,6 +286,15 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "filled_orders": float(df["filled_orders"].sum()),
         "blocked_orders": float(df["blocked_orders"].sum()),
         "rejected_orders": float(df["rejected_orders"].sum()),
+        "target_weight_source_external_rate_pct": float(external_rate),
+        "target_weight_checksum_coverage_pct": float(checksum_coverage),
+        "target_weight_checksum_unique_count": float(target_weight_checksum[target_weight_checksum.str.strip().ne("")].nunique()),
+        "entry_not_tradable_orders": float(entry_not_tradable),
+        "exit_not_tradable_orders": float(exit_not_tradable),
+        "blocked_target_weight_sum": float(df["blocked_target_weight"].sum()),
+        "entry_not_tradable_target_weight_sum": float(df["entry_not_tradable_target_weight"].sum()),
+        "exit_not_tradable_target_weight_sum": float(df["exit_not_tradable_target_weight"].sum()),
+        "max_daily_tradability_blocked_orders": float(daily_tradability_blocked.max()) if len(df) else 0.0,
     }
 
 
@@ -540,6 +577,15 @@ def main() -> int:
                         "unfilled_target_weight_sum": float(metrics.get("unfilled_target_weight_sum", 0.0)),
                         "impact_cost_bps_mean": float(metrics.get("impact_cost_bps_mean", 0.0)),
                         "max_participation_pct": float(metrics.get("max_participation_pct", 0.0)),
+                        "target_weight_source_external_rate_pct": float(metrics.get("target_weight_source_external_rate_pct", 0.0)),
+                        "target_weight_checksum_coverage_pct": float(metrics.get("target_weight_checksum_coverage_pct", 0.0)),
+                        "target_weight_checksum_unique_count": float(metrics.get("target_weight_checksum_unique_count", 0.0)),
+                        "entry_not_tradable_orders": float(metrics.get("entry_not_tradable_orders", 0.0)),
+                        "exit_not_tradable_orders": float(metrics.get("exit_not_tradable_orders", 0.0)),
+                        "blocked_target_weight_sum": float(metrics.get("blocked_target_weight_sum", 0.0)),
+                        "entry_not_tradable_target_weight_sum": float(metrics.get("entry_not_tradable_target_weight_sum", 0.0)),
+                        "exit_not_tradable_target_weight_sum": float(metrics.get("exit_not_tradable_target_weight_sum", 0.0)),
+                        "max_daily_tradability_blocked_orders": float(metrics.get("max_daily_tradability_blocked_orders", 0.0)),
                         "objective_score": float(obj),
                     }
                 )

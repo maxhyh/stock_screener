@@ -4,6 +4,15 @@ Record recurring mistakes and failure modes. Keep this practical: symptom, cause
 
 ## Error Log
 
+### 2026-04-26 | Promotion can pass strict gates over inconsistent target-weight evidence
+- tags: promotion, checksum, target_weight
+- status: active
+- severity: critical
+- mitigation: Require P2 summaries to report external target-weight source rate and checksum coverage, and hard-fail candidates below 100%.
+- evidence: Expert review emphasized that strict promotion logic is insufficient if daily, optimizer, and P2 requested weights are not provably the same evidence chain.
+
+Do not accept a candidate whose execution artifacts cannot prove target-weight lineage.
+
 ### 2026-04-26 | P2 replay can become invalid if a script-level rebalance path recomputes target weights
 - tags: p2, target_weight, promotion
 - status: active

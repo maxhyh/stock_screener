@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import numpy as np
 
 
@@ -35,3 +38,21 @@ def build_score_weights(scores: np.ndarray, total_target: float, single_cap: flo
     if np.any(~fixed):
         w[~fixed] = np.minimum(w[~fixed], single_cap)
     return w
+
+
+def build_target_weight_checksum(code_weights, *, precision: int = 10) -> str:
+    """Build a stable checksum for a code -> target_weight set."""
+    rows: list[tuple[str, float]] = []
+    for code, weight in code_weights:
+        code_s = str(code or "").strip()
+        if not code_s:
+            continue
+        try:
+            w = float(weight)
+        except Exception:
+            continue
+        if not np.isfinite(w) or w <= 0:
+            continue
+        rows.append((code_s, round(float(w), int(precision))))
+    payload = json.dumps(sorted(rows), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

@@ -11,7 +11,7 @@ import pandas as pd
 
 from core.execution.adapter import BrokerAdapter, RebalanceResult
 from utils.code_utils import limit_ratio_for_stock, normalize_ts_code
-from utils.portfolio_weights import build_score_weights
+from utils.portfolio_weights import build_score_weights, build_target_weight_checksum
 
 
 class PaperBrokerStateError(RuntimeError):
@@ -524,6 +524,7 @@ class PaperBroker(BrokerAdapter):
             "target_weight_sum": float(np.sum(list(target_weight_map.values()))) if target_weight_map else 0.0,
             "target_weight_raw_sum": float(np.sum(list(target_weight_raw_map.values()))) if target_weight_raw_map else 0.0,
             "target_weight_source": str(target_weight_source),
+            "target_weight_checksum": build_target_weight_checksum(target_weight_map.items()),
             "unfilled_target_weight": float(np.sum(list(unfilled_weight_map.values()))) if unfilled_weight_map else 0.0,
             "impact_cost_bps_mean": float(np.mean(list(impact_bps_map.values()))) if impact_bps_map else 0.0,
             "max_participation_pct": float(np.max(list(participation_map.values()))) if participation_map else 0.0,

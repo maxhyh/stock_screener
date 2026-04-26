@@ -372,6 +372,12 @@ def _minimal_p2_for_gate(candidate: str = "candidate", **candidate_overrides) ->
         "p2_mdd_not_worse_than_main_windows": 3,
         "p2_target_weight_sum_mean": 0.36,
         "p2_target_weight_sum_60": 0.30,
+        "p2_target_weight_source_external_rate_pct": 100.0,
+        "p2_target_weight_checksum_coverage_pct": 100.0,
+        "p2_entry_not_tradable_orders_sum": 10,
+        "p2_exit_not_tradable_orders_sum": 5,
+        "p2_blocked_target_weight_sum": 0.10,
+        "p2_max_daily_tradability_blocked_orders": 5,
         "shadow_executed_days_total": 270,
         "shadow_adv_blocked_rows_total": 80,
         "shadow_mean_top_industry_invested_weight_pct": 30.0,
@@ -441,3 +447,38 @@ def test_promotion_hard_gate_rejects_adv_blocked_hard_cap():
     candidate = out[out["profile"] == candidate_name].iloc[0]
     assert int(candidate["promotion_hard_gate_pass"]) == 0
     assert "adv_blocked_rows_hard_cap_failed" in candidate["promotion_hard_gate_reasons"]
+
+
+def test_promotion_hard_gate_rejects_target_weight_source_or_checksum_gap():
+    candidate_name = "quality_regime_candidate_v8_execution_repair"
+    out = review._build_promotion_review(
+        _minimal_research_for_gate(candidate_name),
+        _minimal_p2_for_gate(
+            candidate_name,
+            p2_target_weight_source_external_rate_pct=99.0,
+            p2_target_weight_checksum_coverage_pct=80.0,
+        ),
+        main_profile="quality_regime",
+    )
+    candidate = out[out["profile"] == candidate_name].iloc[0]
+    assert int(candidate["promotion_hard_gate_pass"]) == 0
+    assert "target_weight_source_not_external" in candidate["promotion_hard_gate_reasons"]
+    assert "target_weight_checksum_missing" in candidate["promotion_hard_gate_reasons"]
+
+
+def test_promotion_hard_gate_rejects_tradability_block_cluster():
+    candidate_name = "quality_regime_candidate_v8_execution_repair"
+    out = review._build_promotion_review(
+        _minimal_research_for_gate(candidate_name),
+        _minimal_p2_for_gate(
+            candidate_name,
+            p2_entry_not_tradable_orders_sum=25,
+            p2_exit_not_tradable_orders_sum=20,
+            p2_max_daily_tradability_blocked_orders=11,
+        ),
+        main_profile="quality_regime",
+    )
+    candidate = out[out["profile"] == candidate_name].iloc[0]
+    assert int(candidate["promotion_hard_gate_pass"]) == 0
+    assert "tradability_blocked_orders_worse_than_main" in candidate["promotion_hard_gate_reasons"]
+    assert "tradability_block_cluster_hard_cap_failed" in candidate["promotion_hard_gate_reasons"]
