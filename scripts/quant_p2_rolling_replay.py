@@ -221,6 +221,21 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "pre_optimizer_blocked_count_sum": 0.0,
             "post_optimizer_blocked_count_sum": 0.0,
             "risk_entry_not_tradable_hit_sum": 0.0,
+            "blocked_sell_current_weight_sum": 0.0,
+            "blocked_sell_current_weight_max": 0.0,
+            "blocked_sell_notional_sum": 0.0,
+            "blocked_sell_orders_sum": 0.0,
+            "blocked_exit_buy_freeze_days": 0.0,
+            "blocked_exit_freeze_orders_sum": 0.0,
+            "blocked_exit_freeze_target_weight_sum": 0.0,
+            "blocked_state_count_max": 0.0,
+            "blocked_state_buy_count_max": 0.0,
+            "blocked_state_sell_count_max": 0.0,
+            "blocked_state_max_consecutive_days_max": 0.0,
+            "blocked_state_sell_notional_max": 0.0,
+            "blocked_state_buy_target_weight_sum": 0.0,
+            "blocked_state_sell_target_weight_sum": 0.0,
+            "blocked_state_resolved_count_sum": 0.0,
         }
     df = pd.read_csv(ledger_file)
     if df.empty:
@@ -253,6 +268,21 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
             "pre_optimizer_blocked_count_sum": 0.0,
             "post_optimizer_blocked_count_sum": 0.0,
             "risk_entry_not_tradable_hit_sum": 0.0,
+            "blocked_sell_current_weight_sum": 0.0,
+            "blocked_sell_current_weight_max": 0.0,
+            "blocked_sell_notional_sum": 0.0,
+            "blocked_sell_orders_sum": 0.0,
+            "blocked_exit_buy_freeze_days": 0.0,
+            "blocked_exit_freeze_orders_sum": 0.0,
+            "blocked_exit_freeze_target_weight_sum": 0.0,
+            "blocked_state_count_max": 0.0,
+            "blocked_state_buy_count_max": 0.0,
+            "blocked_state_sell_count_max": 0.0,
+            "blocked_state_max_consecutive_days_max": 0.0,
+            "blocked_state_sell_notional_max": 0.0,
+            "blocked_state_buy_target_weight_sum": 0.0,
+            "blocked_state_sell_target_weight_sum": 0.0,
+            "blocked_state_resolved_count_sum": 0.0,
         }
 
     for c in [
@@ -285,6 +315,20 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "pre_optimizer_blocked_count",
         "post_optimizer_blocked_count",
         "risk_entry_not_tradable_hit",
+        "blocked_sell_current_weight",
+        "blocked_sell_notional",
+        "blocked_sell_orders",
+        "blocked_exit_buy_freeze",
+        "blocked_exit_freeze_orders",
+        "blocked_exit_freeze_target_weight",
+        "blocked_state_count",
+        "blocked_state_buy_count",
+        "blocked_state_sell_count",
+        "blocked_state_max_consecutive_days",
+        "blocked_state_sell_notional",
+        "blocked_state_buy_target_weight",
+        "blocked_state_sell_target_weight",
+        "blocked_state_resolved_count",
     ]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -357,6 +401,21 @@ def _summarize_ledger(ledger_file: Path) -> dict[str, float]:
         "pre_optimizer_blocked_count_sum": float(df["pre_optimizer_blocked_count"].sum()),
         "post_optimizer_blocked_count_sum": float(df["post_optimizer_blocked_count"].sum()),
         "risk_entry_not_tradable_hit_sum": float(df["risk_entry_not_tradable_hit"].sum()),
+        "blocked_sell_current_weight_sum": float(df["blocked_sell_current_weight"].sum()),
+        "blocked_sell_current_weight_max": float(df["blocked_sell_current_weight"].max()) if len(df) else 0.0,
+        "blocked_sell_notional_sum": float(df["blocked_sell_notional"].sum()),
+        "blocked_sell_orders_sum": float(df["blocked_sell_orders"].sum()),
+        "blocked_exit_buy_freeze_days": float((df["blocked_exit_buy_freeze"] > 0).sum()),
+        "blocked_exit_freeze_orders_sum": float(df["blocked_exit_freeze_orders"].sum()),
+        "blocked_exit_freeze_target_weight_sum": float(df["blocked_exit_freeze_target_weight"].sum()),
+        "blocked_state_count_max": float(df["blocked_state_count"].max()) if len(df) else 0.0,
+        "blocked_state_buy_count_max": float(df["blocked_state_buy_count"].max()) if len(df) else 0.0,
+        "blocked_state_sell_count_max": float(df["blocked_state_sell_count"].max()) if len(df) else 0.0,
+        "blocked_state_max_consecutive_days_max": float(df["blocked_state_max_consecutive_days"].max()) if len(df) else 0.0,
+        "blocked_state_sell_notional_max": float(df["blocked_state_sell_notional"].max()) if len(df) else 0.0,
+        "blocked_state_buy_target_weight_sum": float(df["blocked_state_buy_target_weight"].sum()),
+        "blocked_state_sell_target_weight_sum": float(df["blocked_state_sell_target_weight"].sum()),
+        "blocked_state_resolved_count_sum": float(df["blocked_state_resolved_count"].sum()),
     }
 
 
@@ -692,6 +751,29 @@ def main() -> int:
                         "pre_optimizer_blocked_count_sum": float(metrics.get("pre_optimizer_blocked_count_sum", 0.0)),
                         "post_optimizer_blocked_count_sum": float(metrics.get("post_optimizer_blocked_count_sum", 0.0)),
                         "risk_entry_not_tradable_hit_sum": float(metrics.get("risk_entry_not_tradable_hit_sum", 0.0)),
+                        "blocked_sell_current_weight_sum": float(metrics.get("blocked_sell_current_weight_sum", 0.0)),
+                        "blocked_sell_current_weight_max": float(metrics.get("blocked_sell_current_weight_max", 0.0)),
+                        "blocked_sell_notional_sum": float(metrics.get("blocked_sell_notional_sum", 0.0)),
+                        "blocked_sell_orders_sum": float(metrics.get("blocked_sell_orders_sum", 0.0)),
+                        "blocked_exit_buy_freeze_days": float(metrics.get("blocked_exit_buy_freeze_days", 0.0)),
+                        "blocked_exit_freeze_orders_sum": float(metrics.get("blocked_exit_freeze_orders_sum", 0.0)),
+                        "blocked_exit_freeze_target_weight_sum": float(
+                            metrics.get("blocked_exit_freeze_target_weight_sum", 0.0)
+                        ),
+                        "blocked_state_count_max": float(metrics.get("blocked_state_count_max", 0.0)),
+                        "blocked_state_buy_count_max": float(metrics.get("blocked_state_buy_count_max", 0.0)),
+                        "blocked_state_sell_count_max": float(metrics.get("blocked_state_sell_count_max", 0.0)),
+                        "blocked_state_max_consecutive_days_max": float(
+                            metrics.get("blocked_state_max_consecutive_days_max", 0.0)
+                        ),
+                        "blocked_state_sell_notional_max": float(metrics.get("blocked_state_sell_notional_max", 0.0)),
+                        "blocked_state_buy_target_weight_sum": float(
+                            metrics.get("blocked_state_buy_target_weight_sum", 0.0)
+                        ),
+                        "blocked_state_sell_target_weight_sum": float(
+                            metrics.get("blocked_state_sell_target_weight_sum", 0.0)
+                        ),
+                        "blocked_state_resolved_count_sum": float(metrics.get("blocked_state_resolved_count_sum", 0.0)),
                         "objective_score": float(obj),
                     }
                 )

@@ -120,6 +120,9 @@ class PaperBroker(BrokerAdapter):
         fee_bps: float,
         slippage_bps: float,
         stamp_tax_bps: float,
+        blocked_state_enabled: bool = True,
+        block_buy_on_exit_blocked: bool = False,
+        blocked_exit_freeze_min_weight: float = 0.0,
     ) -> None:
         self.state_file = Path(state_file)
         self.initial_capital = max(100000.0, float(initial_capital))
@@ -127,6 +130,9 @@ class PaperBroker(BrokerAdapter):
         self.fee_bps = max(0.0, float(fee_bps))
         self.slippage_bps = max(0.0, float(slippage_bps))
         self.stamp_tax_bps = max(0.0, float(stamp_tax_bps))
+        self.blocked_state_enabled = bool(blocked_state_enabled)
+        self.block_buy_on_exit_blocked = bool(block_buy_on_exit_blocked)
+        self.blocked_exit_freeze_min_weight = max(0.0, float(blocked_exit_freeze_min_weight))
 
     def _initial_state(self) -> dict[str, object]:
         return {
@@ -136,6 +142,7 @@ class PaperBroker(BrokerAdapter):
             "nav": float(self.initial_capital),
             "last_trade_date": "",
             "last_signal_date": "",
+            "blocked_order_state": {},
         }
 
     def _quarantine_bad_state_file(self) -> Path | None:
@@ -158,6 +165,7 @@ class PaperBroker(BrokerAdapter):
                 raise ValueError("bad state format")
             st.setdefault("positions", {})
             st.setdefault("cash", float(self.initial_capital))
+            st.setdefault("blocked_order_state", {})
             return st
         except Exception as exc:
             bad_path = self._quarantine_bad_state_file()
@@ -172,6 +180,76 @@ class PaperBroker(BrokerAdapter):
             return
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _blocked_key(side: str, code: str) -> str:
+        return f"{str(side).upper()}:{normalize_ts_code(code)}"
+
+    def _update_blocked_order_state(
+        self,
+        *,
+        prior_state: dict[str, object],
+        orders_df: pd.DataFrame,
+        trade_date: pd.Timestamp,
+    ) -> tuple[dict[str, dict[str, object]], dict[str, float]]:
+        prior_raw = prior_state.get("blocked_order_state", {})
+        prior = prior_raw if isinstance(prior_raw, dict) else {}
+        active: dict[str, dict[str, object]] = {}
+        trade_date_s = pd.Timestamp(trade_date).strftime("%Y-%m-%d")
+
+        if orders_df is not None and not orders_df.empty:
+            blocked = orders_df[orders_df["status"].astype(str).eq("blocked")].copy()
+        else:
+            blocked = pd.DataFrame()
+
+        for row in blocked.to_dict(orient="records"):
+            code = normalize_ts_code(row.get("code", ""))
+            side = str(row.get("side", "") or "").upper()
+            if not code or side not in {"BUY", "SELL"}:
+                continue
+            key = self._blocked_key(side, code)
+            old = prior.get(key, {}) if isinstance(prior.get(key, {}), dict) else {}
+            old_last = str(old.get("last_trade_date", "") or "")
+            consecutive = int(_safe_float(old.get("consecutive_days", 0), 0))
+            if old_last == trade_date_s:
+                consecutive = max(1, consecutive)
+            else:
+                old_ts = pd.to_datetime(old_last, errors="coerce")
+                day_gap = (pd.Timestamp(trade_date).normalize() - old_ts.normalize()).days if pd.notna(old_ts) else 0
+                consecutive = consecutive + 1 if old_last and old_last < trade_date_s and 0 < day_gap <= 4 else 1
+            open_px = _safe_float(row.get("open_price", np.nan), np.nan)
+            requested_qty = int(_safe_float(row.get("requested_qty", 0), 0))
+            blocked_notional = float(requested_qty * open_px) if np.isfinite(open_px) and open_px > 0 else 0.0
+            active[key] = {
+                "side": side,
+                "code": code,
+                "name": str(row.get("name", "") or code),
+                "reason": str(row.get("reason", "") or ""),
+                "first_trade_date": str(old.get("first_trade_date", trade_date_s) or trade_date_s),
+                "last_trade_date": trade_date_s,
+                "consecutive_days": int(consecutive),
+                "total_blocked_days": int(_safe_float(old.get("total_blocked_days", 0), 0)) + 1,
+                "requested_qty": requested_qty,
+                "target_qty": int(_safe_float(row.get("target_qty", 0), 0)),
+                "target_weight": float(_safe_float(row.get("target_weight", 0.0), 0.0)),
+                "blocked_notional": float(blocked_notional),
+                "rank": int(_safe_float(row.get("rank", 9999), 9999)),
+            }
+
+        max_consecutive = max([int(v.get("consecutive_days", 0)) for v in active.values()] or [0])
+        sell_state = [v for v in active.values() if str(v.get("side", "")) == "SELL"]
+        buy_state = [v for v in active.values() if str(v.get("side", "")) == "BUY"]
+        metrics = {
+            "blocked_state_count": float(len(active)),
+            "blocked_state_buy_count": float(len(buy_state)),
+            "blocked_state_sell_count": float(len(sell_state)),
+            "blocked_state_max_consecutive_days": float(max_consecutive),
+            "blocked_state_sell_notional": float(sum(_safe_float(x.get("blocked_notional", 0.0), 0.0) for x in sell_state)),
+            "blocked_state_buy_target_weight": float(sum(_safe_float(x.get("target_weight", 0.0), 0.0) for x in buy_state)),
+            "blocked_state_sell_target_weight": float(sum(_safe_float(x.get("target_weight", 0.0), 0.0) for x in sell_state)),
+            "blocked_state_resolved_count": float(max(0, len(prior) - len(active))),
+        }
+        return active, metrics
 
     def rebalance_on_state(
         self,
@@ -277,6 +355,9 @@ class PaperBroker(BrokerAdapter):
 
         order_rows: list[dict[str, object]] = []
         fill_rows: list[dict[str, object]] = []
+        blocked_sell_current_weight_total = 0.0
+        blocked_sell_notional_total = 0.0
+        blocked_sell_order_count = 0
 
         # 先卖后买
         for code in all_codes:
@@ -288,6 +369,12 @@ class PaperBroker(BrokerAdapter):
             name = name_map.get(code, str(positions.get(code, {}).get("name", code)))
             bar = _get_bar_row(bars_idx, trade_date, code)
             if not _can_exit(bar, code, name):
+                open_px = _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan
+                blocked_notional = float(qty_req * open_px) if np.isfinite(open_px) and open_px > 0 else 0.0
+                blocked_current_weight = float(blocked_notional / max(nav_pre, 1e-12)) if blocked_notional > 0 else 0.0
+                blocked_sell_current_weight_total += blocked_current_weight
+                blocked_sell_notional_total += blocked_notional
+                blocked_sell_order_count += 1
                 order_rows.append(
                     {
                         "run_id": run_id,
@@ -303,7 +390,9 @@ class PaperBroker(BrokerAdapter):
                         "filled_qty": 0,
                         "status": "blocked",
                         "reason": "exit_not_tradable",
-                        "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
+                        "open_price": open_px,
+                        "blocked_notional": float(blocked_notional),
+                        "blocked_current_weight": float(blocked_current_weight),
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
                         "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
@@ -345,6 +434,8 @@ class PaperBroker(BrokerAdapter):
                     "status": "filled",
                     "reason": "ok",
                     "open_price": open_px,
+                    "blocked_notional": 0.0,
+                    "blocked_current_weight": 0.0,
                     "target_weight": float(target_weight_map.get(code, 0.0)),
                     "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
                     "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
@@ -371,6 +462,12 @@ class PaperBroker(BrokerAdapter):
                 }
             )
 
+        buy_freeze_due_to_exit_block = bool(
+            self.block_buy_on_exit_blocked
+            and blocked_sell_order_count > 0
+            and blocked_sell_current_weight_total >= float(self.blocked_exit_freeze_min_weight) - 1e-12
+        )
+
         for code in sorted(all_codes, key=lambda x: rank_map.get(x, 9999)):
             cur = int(positions.get(code, {}).get("qty", 0))
             tgt = int(target_qty_map.get(code, 0))
@@ -379,6 +476,35 @@ class PaperBroker(BrokerAdapter):
             qty_req = tgt - cur
             name = name_map.get(code, str(positions.get(code, {}).get("name", code)))
             bar = _get_bar_row(bars_idx, trade_date, code)
+            if buy_freeze_due_to_exit_block:
+                order_rows.append(
+                    {
+                        "run_id": run_id,
+                        "signal_date": signal_date.strftime("%Y-%m-%d"),
+                        "trade_date": trade_date.strftime("%Y-%m-%d"),
+                        "code": code,
+                        "name": name,
+                        "side": "BUY",
+                        "rank": int(rank_map.get(code, 9999)),
+                        "current_qty": cur,
+                        "target_qty": tgt,
+                        "requested_qty": qty_req,
+                        "filled_qty": 0,
+                        "status": "blocked",
+                        "reason": "blocked_exit_freeze",
+                        "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
+                        "blocked_notional": 0.0,
+                        "blocked_current_weight": 0.0,
+                        "target_weight": float(target_weight_map.get(code, 0.0)),
+                        "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
+                        "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
+                        "participation_pct": float(participation_map.get(code, 0.0)),
+                        "impact_cost_bps": float(impact_bps_map.get(code, 0.0)),
+                        "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
+                        "industry_weight_post": float(industry_weight_map.get(code, 0.0)),
+                    }
+                )
+                continue
             if not _can_enter(bar, code, name):
                 order_rows.append(
                     {
@@ -396,6 +522,8 @@ class PaperBroker(BrokerAdapter):
                         "status": "blocked",
                         "reason": "entry_not_tradable",
                         "open_price": _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan,
+                        "blocked_notional": 0.0,
+                        "blocked_current_weight": 0.0,
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
                         "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
@@ -431,6 +559,8 @@ class PaperBroker(BrokerAdapter):
                         "status": "rejected",
                         "reason": "insufficient_cash",
                         "open_price": open_px,
+                        "blocked_notional": 0.0,
+                        "blocked_current_weight": 0.0,
                         "target_weight": float(target_weight_map.get(code, 0.0)),
                         "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
                         "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
@@ -474,6 +604,8 @@ class PaperBroker(BrokerAdapter):
                     "status": status,
                     "reason": reason,
                     "open_price": open_px,
+                    "blocked_notional": 0.0,
+                    "blocked_current_weight": 0.0,
                     "target_weight": float(target_weight_map.get(code, 0.0)),
                     "target_weight_raw": float(target_weight_raw_map.get(code, 0.0)),
                     "target_weight_source": str(target_weight_source_map.get(code, target_weight_source)),
@@ -506,6 +638,20 @@ class PaperBroker(BrokerAdapter):
 
         orders_df = pd.DataFrame(order_rows)
         fills_df = pd.DataFrame(fill_rows)
+        if not orders_df.empty and "reason" in orders_df.columns:
+            freeze_mask = orders_df["reason"].astype(str).eq("blocked_exit_freeze")
+            blocked_exit_freeze_orders = int(freeze_mask.sum())
+            blocked_exit_freeze_target_weight = float(
+                pd.to_numeric(orders_df.loc[freeze_mask, "target_weight"], errors="coerce").fillna(0.0).sum()
+            )
+        else:
+            blocked_exit_freeze_orders = 0
+            blocked_exit_freeze_target_weight = 0.0
+        blocked_order_state, blocked_state_metrics = (
+            self._update_blocked_order_state(prior_state=state, orders_df=orders_df, trade_date=trade_date)
+            if self.blocked_state_enabled
+            else ({}, {})
+        )
         new_state = {
             "version": 1,
             "cash": float(cash),
@@ -514,6 +660,7 @@ class PaperBroker(BrokerAdapter):
             "nav_pre": float(nav_pre),
             "last_trade_date": trade_date.strftime("%Y-%m-%d"),
             "last_signal_date": signal_date.strftime("%Y-%m-%d"),
+            "blocked_order_state": blocked_order_state,
         }
         ledger_row = {
             "run_id": run_id,
@@ -536,7 +683,15 @@ class PaperBroker(BrokerAdapter):
             "unfilled_target_weight": float(np.sum(list(unfilled_weight_map.values()))) if unfilled_weight_map else 0.0,
             "impact_cost_bps_mean": float(np.mean(list(impact_bps_map.values()))) if impact_bps_map else 0.0,
             "max_participation_pct": float(np.max(list(participation_map.values()))) if participation_map else 0.0,
+            "blocked_sell_current_weight": float(blocked_sell_current_weight_total),
+            "blocked_sell_notional": float(blocked_sell_notional_total),
+            "blocked_sell_orders": int(blocked_sell_order_count),
+            "blocked_exit_buy_freeze": int(buy_freeze_due_to_exit_block),
+            "blocked_exit_freeze_orders": int(blocked_exit_freeze_orders),
+            "blocked_exit_freeze_target_weight": float(blocked_exit_freeze_target_weight),
         }
+        for k, v in blocked_state_metrics.items():
+            ledger_row[k] = float(v)
         return RebalanceResult(
             orders_df=orders_df,
             fills_df=fills_df,

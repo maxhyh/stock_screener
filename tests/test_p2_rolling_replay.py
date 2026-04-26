@@ -56,10 +56,24 @@ def test_summarize_ledger_basic_metrics(tmp_path: Path):
                 "entry_not_tradable_orders": [1, 3],
                 "exit_not_tradable_orders": [0, 2],
                 "blocked_target_weight": [0.03, 0.07],
-                "entry_not_tradable_target_weight": [0.03, 0.05],
-                "exit_not_tradable_target_weight": [0.0, 0.02],
-            }
-        )
+            "entry_not_tradable_target_weight": [0.03, 0.05],
+            "exit_not_tradable_target_weight": [0.0, 0.02],
+            "blocked_sell_current_weight": [0.04, 0.08],
+            "blocked_sell_notional": [40_000.0, 80_000.0],
+            "blocked_sell_orders": [1, 2],
+            "blocked_exit_buy_freeze": [1, 0],
+            "blocked_exit_freeze_orders": [3, 0],
+            "blocked_exit_freeze_target_weight": [0.12, 0.0],
+            "blocked_state_count": [4, 2],
+            "blocked_state_buy_count": [3, 1],
+            "blocked_state_sell_count": [1, 1],
+            "blocked_state_max_consecutive_days": [1, 2],
+            "blocked_state_sell_notional": [40_000.0, 90_000.0],
+            "blocked_state_buy_target_weight": [0.12, 0.04],
+            "blocked_state_sell_target_weight": [0.04, 0.08],
+            "blocked_state_resolved_count": [0, 2],
+        }
+    )
     ledger_file = tmp_path / "ledger.csv"
     ledger.to_csv(ledger_file, index=False, encoding="utf-8-sig")
 
@@ -77,6 +91,19 @@ def test_summarize_ledger_basic_metrics(tmp_path: Path):
     assert float(s["exit_not_tradable_orders"]) == 2.0
     assert round(float(s["blocked_target_weight_sum"]), 2) == 0.10
     assert float(s["max_daily_tradability_blocked_orders"]) == 5.0
+    assert round(float(s["blocked_sell_current_weight_sum"]), 2) == 0.12
+    assert round(float(s["blocked_sell_current_weight_max"]), 2) == 0.08
+    assert float(s["blocked_sell_notional_sum"]) == 120_000.0
+    assert float(s["blocked_sell_orders_sum"]) == 3.0
+    assert float(s["blocked_exit_buy_freeze_days"]) == 1.0
+    assert float(s["blocked_exit_freeze_orders_sum"]) == 3.0
+    assert round(float(s["blocked_exit_freeze_target_weight_sum"]), 2) == 0.12
+    assert float(s["blocked_state_count_max"]) == 4.0
+    assert float(s["blocked_state_max_consecutive_days_max"]) == 2.0
+    assert float(s["blocked_state_sell_notional_max"]) == 90_000.0
+    assert round(float(s["blocked_state_buy_target_weight_sum"]), 2) == 0.16
+    assert round(float(s["blocked_state_sell_target_weight_sum"]), 2) == 0.12
+    assert float(s["blocked_state_resolved_count_sum"]) == 2.0
 
 
 def test_main_passes_metadata_gate_overrides(monkeypatch, tmp_path: Path):

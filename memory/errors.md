@@ -4,6 +4,24 @@ Record recurring mistakes and failure modes. Keep this practical: symptom, cause
 
 ## Error Log
 
+### 2026-04-27 | Blocked sells can create false buying power if not stateful
+- tags: blocked_orders, p2, cash, a_share
+- status: active
+- severity: critical
+- mitigation: Track active blocked orders in `PaperBroker` and freeze new buys when blocked sell exposure exceeds the configured threshold.
+- evidence: v9 added `blocked_order_state`, `blocked_sell_current_weight`, `blocked_exit_buy_freeze`, and rolling replay summaries after v8 showed late-March/early-April `exit_not_tradable` clusters.
+
+A-share sell failures are not just missing fills; they leave trapped risk in the book. Do not allow reserve replacement or new buys to spend risk budget as if a blocked sell had completed.
+
+### 2026-04-27 | Capacity-safe reserves do not help when the executable pool collapses
+- tags: v9, reserve_pool, tradability, p2
+- status: active
+- severity: high
+- mitigation: Treat reserve pools as replacement capacity, not a guarantee of fills; add blocked-cluster diagnostics and avoid promotion unless replay shows actual fills and NAV/MDD parity.
+- evidence: v9 smoke for `2026-03-30` and `2026-04-07` used profile-isolated 40% target files and v9 P2 profile settings, but all kept buy orders were blocked as `entry_not_tradable` and NAV stayed flat.
+
+When the whole candidate slice is blocked by A-share tradability, better reserve ordering only improves observability. It does not create executable alpha.
+
 ### 2026-04-27 | Shared daily fallback contaminates profile replay evidence
 - tags: p2, profile, replay, evidence
 - status: active

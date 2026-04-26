@@ -119,3 +119,60 @@ def test_build_signal_pretrade_cfg_prefers_profile_defaults_when_env_missing(mon
     assert abs(float(cfg.max_adv_participation) - 0.04) < 1e-9
     assert abs(float(cfg.max_industry_weight) - 0.30) < 1e-9
     assert abs(float(cfg.min_price) - 3.0) < 1e-9
+
+
+def test_resolve_profile_total_position_respects_non_regime_profiles():
+    assert abs(
+        daily_ml_select._resolve_profile_total_position(
+            "60%-80%",
+            {"use_regime_position": False, "fallback_total_position": 0.40},
+        )
+        - 0.40
+    ) < 1e-9
+    assert abs(
+        daily_ml_select._resolve_profile_total_position(
+            "60%-80%",
+            {"use_regime_position": True, "fallback_total_position": 0.40},
+        )
+        - 0.70
+    ) < 1e-9
+
+
+def test_capacity_safe_reserve_pool_keeps_primary_and_reranks_reserves():
+    pool = pd.DataFrame(
+        {
+            "ts_code": ["000001", "000002", "000003", "000004"],
+            "refactor_score": [0.99, 0.98, 0.97, 0.50],
+            "amount_ma20": [500_000_000, 400_000_000, 5_000_000, 650_000_000],
+            "amount_last": [500_000_000, 400_000_000, 5_000_000, 650_000_000],
+            "amount_min5": [480_000_000, 380_000_000, 4_000_000, 640_000_000],
+            "amount_min10": [470_000_000, 370_000_000, 4_500_000, 630_000_000],
+            "adv_capacity_score": [0.90, 0.80, 0.05, 1.00],
+            "liquidity_score": [0.90, 0.80, 0.05, 1.00],
+            "industry_balance_score": [0.50, 0.50, 0.50, 0.50],
+            "signal_quality": [0.90, 0.85, 0.80, 0.80],
+            "pct_chg": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+
+    out, score_col, info = daily_ml_select._prepare_capacity_safe_reserve_pool(
+        pool,
+        ranking_col="refactor_score",
+        primary_top_n=2,
+        profile_cfg={
+            "capacity_safe_reserve_enabled": True,
+            "capacity_safe_reserve_amount_col": "amount_capacity_conservative",
+            "reserve_capacity_blend": 0.70,
+            "reserve_rank_blend": 0.20,
+            "reserve_liquidity_blend": 0.10,
+        },
+    )
+
+    assert score_col == "portfolio_rank_score"
+    assert info["enabled"] is True
+    assert out.iloc[0]["ts_code"] == "000001"
+    assert out.iloc[1]["ts_code"] == "000002"
+    reserves = out[out["reserve_candidate"] == 1].reset_index(drop=True)
+    assert reserves.iloc[0]["ts_code"] == "000004"
+    assert reserves.iloc[1]["ts_code"] == "000003"
+    assert float(out.iloc[1]["portfolio_rank_score"]) > float(reserves.iloc[0]["portfolio_rank_score"])

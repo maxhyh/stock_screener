@@ -4,6 +4,15 @@ Append durable research, execution, and governance learnings here. Keep entries 
 
 ## Learnings Log
 
+### 2026-04-27 | v9 should repair execution breaks before alpha/risk tuning
+- tags: v9, reserve_pool, blocked_orders, p2
+- reusable: yes
+- confidence: high
+- evidence: Implemented `quality_regime_candidate_v9_exec_state`, capacity-safe upstream reserve ranking (`portfolio_rank_score`), blocked-order state tracking in `PaperBroker`, and rolling replay summary fields for blocked-sell/freeze state evidence. Smoke rebuilt v9 `2026-03-27` and `2026-04-03` files at 40% target posture, then P2 smoke for `2026-03-30` and `2026-04-07` produced zero fills with blocked buy states visible.
+- action: Use v9 to diagnose whether 2026-03-30 and 2026-04-07 style blocked clusters can be reduced without relaxing industry/ADV caps or raising exposure floors.
+
+Capacity-safe reserves should be generated before portfolio/P2 pretrade, and blocked sells should become explicit state that can freeze new buys when trapped sell exposure is material. This prevents false cash reuse and makes late-March/early-April execution breaks reviewable.
+
 ### 2026-04-27 | Profile-specific signal calendars are mandatory for fair replay
 - tags: p2, profile, evidence, replay
 - reusable: yes

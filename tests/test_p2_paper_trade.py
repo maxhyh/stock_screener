@@ -69,6 +69,24 @@ def _bars_idx_three_for_date(trade_date: str) -> pd.DataFrame:
     return df.set_index(["trade_date", "code"]).sort_index()
 
 
+def _bars_idx_blocked_exit_and_buy(trade_date: str) -> pd.DataFrame:
+    td = pd.Timestamp(trade_date)
+    df = pd.DataFrame(
+        {
+            "trade_date": [td, td],
+            "code": ["000001", "000002"],
+            "open": [9.0, 20.0],
+            "high": [9.0, 20.2],
+            "low": [9.0, 19.8],
+            "close": [9.0, 20.1],
+            "vol": [1_000_000, 1_500_000],
+            "amount": [90_000_000, 200_000_000],
+            "prev_close": [10.0, 19.9],
+        }
+    )
+    return df.set_index(["trade_date", "code"]).sort_index()
+
+
 def test_create_broker_returns_paper_instance(tmp_path):
     broker = create_broker(
         "paper",
@@ -241,6 +259,72 @@ def test_rebalance_blocks_limit_up_entry(tmp_path):
     assert orders_df.iloc[0]["status"] == "blocked"
     assert orders_df.iloc[0]["reason"] == "entry_not_tradable"
     assert new_state["positions"] == {}
+
+
+def test_rebalance_tracks_blocked_exit_state_and_freezes_new_buys(tmp_path):
+    broker = PaperBroker(
+        state_file=tmp_path / "paper_state.json",
+        initial_capital=1_000_000,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+        blocked_state_enabled=True,
+        block_buy_on_exit_blocked=True,
+        blocked_exit_freeze_min_weight=0.02,
+    )
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000002"],
+            "名称": ["万科A"],
+            "ML评分": [0.9],
+            "排名_num": [1],
+            "target_weight": [0.30],
+        }
+    )
+
+    result = broker.rebalance_on_state(
+        state={
+            "cash": 900_000.0,
+            "positions": {"000001": {"name": "平安银行", "qty": 10_000, "avg_cost": 10.0}},
+        },
+        signal_df=signal_df,
+        bars_idx=_bars_idx_blocked_exit_and_buy("2026-03-30"),
+        signal_date=pd.Timestamp("2026-03-27"),
+        trade_date=pd.Timestamp("2026-03-30"),
+        run_id="blocked_exit_state",
+        top_n=1,
+        target_total_pos=0.30,
+        max_single_pos=0.30,
+    )
+
+    orders = result.orders_df.set_index(["side", "code"])
+    assert orders.loc[("SELL", "000001"), "status"] == "blocked"
+    assert orders.loc[("SELL", "000001"), "reason"] == "exit_not_tradable"
+    assert orders.loc[("BUY", "000002"), "status"] == "blocked"
+    assert orders.loc[("BUY", "000002"), "reason"] == "blocked_exit_freeze"
+    assert int(result.ledger_row["blocked_exit_buy_freeze"]) == 1
+    assert int(result.ledger_row["blocked_exit_freeze_orders"]) == 1
+    assert float(result.ledger_row["blocked_sell_current_weight"]) > 0.02
+    blocked_state = result.state["blocked_order_state"]
+    assert "SELL:000001" in blocked_state
+    assert "BUY:000002" in blocked_state
+    assert int(blocked_state["SELL:000001"]["consecutive_days"]) == 1
+
+    second = broker.rebalance_on_state(
+        state=result.state,
+        signal_df=signal_df,
+        bars_idx=_bars_idx_blocked_exit_and_buy("2026-04-07"),
+        signal_date=pd.Timestamp("2026-04-03"),
+        trade_date=pd.Timestamp("2026-04-07"),
+        run_id="blocked_exit_state_after_gap",
+        top_n=1,
+        target_total_pos=0.30,
+        max_single_pos=0.30,
+    )
+    second_state = second.state["blocked_order_state"]
+    assert int(second_state["SELL:000001"]["total_blocked_days"]) == 2
+    assert int(second_state["SELL:000001"]["consecutive_days"]) == 1
 
 
 def test_paper_broker_requires_explicit_reset_when_state_is_corrupt(tmp_path):

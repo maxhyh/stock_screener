@@ -108,6 +108,117 @@ def _sanitize_profile_slug(raw: object) -> str:
     return s
 
 
+def _norm01_series(raw: pd.Series) -> pd.Series:
+    s = pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    finite = s.dropna()
+    if finite.empty:
+        return pd.Series(0.0, index=raw.index, dtype=float)
+    lo = float(finite.min())
+    hi = float(finite.max())
+    if hi - lo <= 1e-12:
+        return pd.Series(0.5, index=raw.index, dtype=float)
+    return ((s.fillna(lo) - lo) / (hi - lo)).clip(0.0, 1.0)
+
+
+def _ensure_capacity_amount_columns(work: pd.DataFrame) -> pd.DataFrame:
+    out = work.copy()
+    if "amount_last" not in out.columns:
+        out["amount_last"] = pd.to_numeric(out.get("amount", 0.0), errors="coerce").fillna(0.0)
+    for col in ("amount_ma20", "amount_last", "amount_min5", "amount_min10"):
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    if "amount_capacity_conservative" not in out.columns:
+        out["amount_capacity_conservative"] = [
+            _positive_min([ma20, last, min5, min10])
+            for ma20, last, min5, min10 in out[
+                ["amount_ma20", "amount_last", "amount_min5", "amount_min10"]
+            ].itertuples(index=False, name=None)
+        ]
+    return out
+
+
+def _prepare_capacity_safe_reserve_pool(
+    pool: pd.DataFrame,
+    *,
+    ranking_col: str,
+    primary_top_n: int,
+    profile_cfg: dict[str, object],
+) -> tuple[pd.DataFrame, str, dict[str, object]]:
+    """Keep primary ranking intact, but rank reserve rows by capacity safety."""
+    if pool is None or pool.empty:
+        return pool, ranking_col, {"enabled": False, "reason": "empty"}
+    if not _profile_bool(profile_cfg, "capacity_safe_reserve_enabled", False):
+        out = pool.copy()
+        out["portfolio_rank_score"] = pd.to_numeric(out.get(ranking_col, 0.0), errors="coerce").fillna(0.0)
+        out["reserve_safe_score"] = 0.0
+        out["reserve_capacity_score"] = 0.0
+        return out, ranking_col, {"enabled": False, "reason": "disabled"}
+
+    work = pool.copy()
+    if ranking_col not in work.columns:
+        work[ranking_col] = 0.0
+    work[ranking_col] = pd.to_numeric(work[ranking_col], errors="coerce").fillna(0.0)
+    work = _ensure_capacity_amount_columns(work)
+
+    primary_n = max(1, min(int(primary_top_n), len(work)))
+    amount_col = str(profile_cfg.get("capacity_safe_reserve_amount_col", "") or "").strip()
+    if not amount_col:
+        amount_col = str(profile_cfg.get("target_capacity_amount_col", "amount_capacity_conservative") or "amount_capacity_conservative")
+    if amount_col not in work.columns:
+        amount_col = "amount_capacity_conservative" if "amount_capacity_conservative" in work.columns else "amount_ma20"
+
+    rank_score = _norm01_series(work[ranking_col])
+    amount_score = _norm01_series(np.log1p(pd.to_numeric(work.get(amount_col, 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)))
+    adv_score = _norm01_series(work.get("adv_capacity_score", amount_score))
+    liquidity_score = _norm01_series(work.get("liquidity_score", amount_score))
+    industry_score = _norm01_series(work.get("industry_balance_score", 0.5))
+    quality_score = _norm01_series(work.get("signal_quality", rank_score))
+    abs_pct = pd.to_numeric(work.get("pct_chg", 0.0), errors="coerce").fillna(0.0).abs()
+    calm_score = 1.0 - _norm01_series(abs_pct)
+
+    capacity_blend = min(max(_profile_float(profile_cfg, "reserve_capacity_blend", 0.45), 0.0), 1.0)
+    rank_blend = min(max(_profile_float(profile_cfg, "reserve_rank_blend", 0.30), 0.0), 1.0)
+    liquidity_blend = min(max(_profile_float(profile_cfg, "reserve_liquidity_blend", 0.10), 0.0), 1.0)
+    industry_blend = min(max(_profile_float(profile_cfg, "reserve_industry_blend", 0.10), 0.0), 1.0)
+    calm_blend = min(max(_profile_float(profile_cfg, "reserve_calm_blend", 0.05), 0.0), 1.0)
+    quality_blend = min(max(_profile_float(profile_cfg, "reserve_quality_blend", 0.0), 0.0), 1.0)
+    raw_total = capacity_blend + rank_blend + liquidity_blend + industry_blend + calm_blend + quality_blend
+    if raw_total <= 1e-12:
+        raw_total = 1.0
+        capacity_blend = 1.0
+
+    capacity_score = (0.65 * amount_score + 0.35 * adv_score).clip(0.0, 1.0)
+    safe_score = (
+        capacity_blend * capacity_score
+        + rank_blend * rank_score
+        + liquidity_blend * liquidity_score
+        + industry_blend * industry_score
+        + calm_blend * calm_score
+        + quality_blend * quality_score
+    ) / raw_total
+    safe_score = safe_score.clip(0.0, 1.0)
+
+    work["_original_rank_score"] = rank_score
+    work["reserve_capacity_score"] = capacity_score
+    work["reserve_safe_score"] = safe_score
+    work = work.sort_values(ranking_col, ascending=False).reset_index(drop=True)
+    work["reserve_candidate"] = (np.arange(len(work)) >= primary_n).astype(int)
+    primary = work.iloc[:primary_n].copy()
+    reserve = work.iloc[primary_n:].copy()
+    primary["portfolio_rank_score"] = 2.0 + _norm01_series(primary[ranking_col])
+    reserve["portfolio_rank_score"] = 1.0 + pd.to_numeric(reserve["reserve_safe_score"], errors="coerce").fillna(0.0)
+    out = pd.concat([primary, reserve], ignore_index=True)
+    out = out.sort_values("portfolio_rank_score", ascending=False).reset_index(drop=True)
+    return out, "portfolio_rank_score", {
+        "enabled": True,
+        "primary_top_n": int(primary_n),
+        "amount_col": str(amount_col),
+        "reserve_rows": int(len(reserve)),
+        "reserve_safe_score_mean": float(pd.to_numeric(reserve.get("reserve_safe_score", pd.Series(dtype=float)), errors="coerce").mean()) if not reserve.empty else 0.0,
+    }
+
+
 def load_latest_model():
     """加载最新的训练模型"""
     if not os.path.exists(MODEL_DIR):
@@ -224,6 +335,18 @@ def _parse_percent_text(text: object, fallback: float) -> float:
         return v / 100.0 if v > 1 else v
     except Exception:
         return float(fallback)
+
+
+def _resolve_profile_total_position(
+    regime_position_range: object,
+    profile_cfg: dict[str, object] | None,
+    fallback: float = 0.60,
+) -> float:
+    cfg = profile_cfg or {}
+    profile_fallback = min(max(_profile_float(cfg, "fallback_total_position", fallback), 0.0), 1.0)
+    if "use_regime_position" in cfg and not _profile_bool(cfg, "use_regime_position", True):
+        return float(profile_fallback)
+    return min(max(_parse_percent_text(regime_position_range, profile_fallback), 0.0), 1.0)
 
 
 def _safe_float(v: object, default: float = 0.0) -> float:
@@ -389,7 +512,7 @@ def _apply_signal_pretrade_gate(
         return ranking_pool, pd.DataFrame(), info
     info["enabled"] = True
 
-    total_target = min(max(_parse_percent_text(regime_position_range, 0.60), 0.0), 1.0)
+    total_target = _resolve_profile_total_position(regime_position_range, profile_cfg, 0.60)
     max_single_pos = min(max(_parse_percent_text(regime_single_stock_max, 0.10), 0.0), 1.0)
     if total_target <= 0:
         total_target = 0.60
@@ -1020,11 +1143,17 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     optimizer_pool_n = _resolve_candidate_pool_n(int(regime_top_n), int(len(ranking_pool)), profile_cfg)
     print(f"\n[5/5] 选择Top {regime_top_n}目标股票 (optimizer_pool={optimizer_pool_n})...")
     top_stocks = ranking_pool.nlargest(optimizer_pool_n, ranking_col).copy()
-    target_total_for_weights = min(max(_parse_percent_text(regime.get("position_range", "60%-80%"), 0.60), 0.0), 1.0)
+    top_stocks, weight_ranking_col, reserve_rank_info = _prepare_capacity_safe_reserve_pool(
+        top_stocks,
+        ranking_col=ranking_col,
+        primary_top_n=int(regime_top_n),
+        profile_cfg=profile_cfg,
+    )
+    target_total_for_weights = _resolve_profile_total_position(regime.get("position_range", "60%-80%"), profile_cfg, 0.60)
     target_single_for_weights = min(max(_parse_percent_text(regime.get("single_stock_max", "10%"), 0.10), 0.0), 1.0)
     top_stocks, optimizer_info = _assign_target_weights(
         top_stocks=top_stocks,
-        ranking_col=ranking_col,
+        ranking_col=weight_ranking_col,
         total_target_pos=target_total_for_weights,
         max_single_pos=target_single_for_weights,
         profile_cfg=profile_cfg,
@@ -1038,7 +1167,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         ranking_col=ranking_col,
         bars_window_df=bars_window_df,
         trade_date=pd.Timestamp(eval_trade_date).normalize(),
-        total_target_pos=min(max(_parse_percent_text(regime.get("position_range", "60%-80%"), 0.60), 0.0), 1.0),
+        total_target_pos=target_total_for_weights,
         max_single_pos=min(max(_parse_percent_text(regime.get("single_stock_max", "10%"), 0.10), 0.0), 1.0),
         profile_cfg=profile_cfg,
         industry_map=industry_map,
@@ -1055,12 +1184,14 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     result = top_stocks[[
         'ts_code', 'name', 'close', 'pct_chg', 'ml_score', 'signal_quality', 'hybrid_score', 'stability_score', 'refactor_score',
         'liquidity_score', 'adv_capacity_score', 'industry_balance_score', 'amount_ma20', 'bias', 'z_score', 'rsi', 'vol_ratio',
+        'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
         'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
         'industry_weight_post', 'constraint_reason', 'reserve_candidate'
     ]].copy()
     
     result.columns = ['代码', '名称', '收盘价', '涨跌幅%', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                       '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'BIAS-20', 'Z-Score', 'RSI', '量比',
+                      'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
                       'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
                       'industry_weight_post', 'constraint_reason', 'reserve_candidate']
     result['代码'] = result['代码'].astype(str).str.zfill(6)
@@ -1068,7 +1199,11 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     result['日期'] = target_date.strftime('%Y-%m-%d')
     result['排名'] = range(1, len(result) + 1)
     result['市场状态'] = regime['state']
-    result['建议仓位'] = regime['position_range']
+    result['建议仓位'] = (
+        regime['position_range']
+        if _profile_bool(profile_cfg, "use_regime_position", True)
+        else f"{target_total_for_weights:.0%}"
+    )
     result['单票上限'] = regime['single_stock_max']
     profile_h = int(resolve_default_label_horizon(fallback=8))
     model_h = None
@@ -1079,24 +1214,41 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     if model_h and model_h != profile_h and not use_model_h:
         print(f"⚠️ 模型标签持有期={model_h} 与 default_profile={profile_h} 不一致，已按平台口径输出 {profile_h}")
     result['建议持有天数'] = int(max(1, suggest_h))
-    target_weight_checksum = build_target_weight_checksum(zip(result["代码"], result["target_weight"]))
     result["target_weight_source"] = "portfolio_optimizer"
-    result["target_weight_checksum"] = target_weight_checksum
+    result["target_weight_checksum"] = ""
     
     # 重新排列列
     result = result[['日期', '市场状态', '建议仓位', '单票上限', '建议持有天数', '排名', '代码', '名称', '收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                      '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'target_weight', 'target_weight_raw',
                      'participation_pct', 'impact_cost_bps', 'unfilled_target_weight', 'industry_weight_post',
-                     'constraint_reason', 'reserve_candidate', 'target_weight_source', 'target_weight_checksum',
+                     'constraint_reason', 'reserve_candidate', 'portfolio_rank_score', 'reserve_safe_score',
+                     'reserve_capacity_score', 'target_weight_source', 'target_weight_checksum',
                      'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']]
     
-    # 保留两位小数
+    # Display metrics can be rounded for readability, but execution weights need
+    # enough precision for P2 checksum and replay consistency.
     float_cols = ['收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分', '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20',
                   'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
-                  'industry_weight_post', 'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']
+                  'industry_weight_post', 'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
+                  'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']
+    weight_cols = {"target_weight", "target_weight_raw", "participation_pct", "unfilled_target_weight", "industry_weight_post"}
+    score_cols = {
+        "质量分",
+        "综合分",
+        "稳定分",
+        "重构分",
+        "流动性分",
+        "ADV容量分",
+        "行业均衡分",
+        "portfolio_rank_score",
+        "reserve_safe_score",
+        "reserve_capacity_score",
+    }
     for col in float_cols:
-        decimals = 4 if col in ("质量分", "综合分", "稳定分", "重构分", "流动性分") else 2
+        decimals = 6 if col in weight_cols else (4 if col in score_cols else 2)
         result[col] = result[col].round(decimals)
+    target_weight_checksum = build_target_weight_checksum(zip(result["代码"], result["target_weight"]))
+    result["target_weight_checksum"] = target_weight_checksum
 
     # 7. 保存结果（daily 子目录 + 兼容旧路径双写）
     base_dir = Path(OUTPUT_DIR)
@@ -1132,6 +1284,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "optimizer_candidate_pool_n": int(optimizer_pool_n),
         "optimizer_primary_top_n": int(regime_top_n),
         "reserve_candidate_count": int(max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))),
+        "capacity_safe_reserve": dict(reserve_rank_info),
         "liquidity_stage": str(liquidity_stage),
         "liquidity_blend": float(liquidity_blend),
         "adv_penalty_blend": float(adv_penalty_blend),

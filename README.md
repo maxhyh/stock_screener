@@ -29,10 +29,13 @@
 2. `docs/PROJECT_INDEX.md`
 3. `config/quant_live_profiles.json`
 4. `core/platform/portfolio_engine.py`
-5. `scripts/quant_p2_paper_trade.py`
-6. `scripts/quant_profile_promotion_review.py`
+5. `core/execution/paper_broker.py`
+6. `scripts/quant_p2_paper_trade.py`
+7. `scripts/quant_profile_promotion_review.py`
 
 当前 Git 仓库只跟踪源码、配置、schema、测试、文档和记忆系统。`data/` 大型行情文件、`output/` 回测与 P2 流水、`logs/` 日志、`models/*.pkl` 模型二进制均为本地运行产物，不随审查快照提交。
+
+当前默认档仍是 `quality_regime`。v9 `quality_regime_candidate_v9_exec_state` 只是 shadow 档，目标是 capacity-safe reserve 上游生成和 blocked-order 状态机，不代表已通过 promotion。
 
 ## 📖 项目简介
 

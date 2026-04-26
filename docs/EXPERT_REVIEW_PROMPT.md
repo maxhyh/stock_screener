@@ -15,7 +15,7 @@ https://github.com/maxhyh/stock_screener
 4. 研究层收益是否能穿透到 P2 paper 执行层。
 5. 组合构建是否专业，是否显式约束行业、单票、ADV participation、风格暴露、换手和成本。
 6. promotion gate 是否足够严格，是否能防止“研究强、执行弱”的 profile 升档。
-7. 当前 v7/v8 优化方向是否正确，是否还存在伪 alpha 或执行口径残差。
+7. 当前 v7/v8/v9 优化方向是否正确，是否还存在伪 alpha 或执行口径残差。
 
 项目背景：
 这是一个面向中国 A 股市场的日频量化选股与纸面执行平台。系统目标不是直接接真实券商，而是先把“研究 -> 信号 -> 回测 -> 风控 -> 纸面执行 -> 一致性诊断 -> 档位治理 -> 自我记忆演化”这条链路打磨到专业水准。
@@ -59,6 +59,9 @@ https://github.com/maxhyh/stock_screener
 - v8 使用 profile 隔离 daily 信号重跑了 60/90/120 P2：NAV 约 `-5.33% / -11.74% / -16.09%`，MDD 约 `-8.10% / -12.78% / -16.79%`，target-weight mean 约 `34.3% / 36.1% / 37.2%`。
 - v8 行业均值约束改善，但 ADV/risk blocked rows 仍很重；shadow diagnosis 约 `1017` ADV blocked rows，3 月底和 4 月初仍有 `entry_not_tradable / exit_not_tradable` 集中爆发。
 - v8 alpha attribution 不支持升档：raw ML top、optimizer、P2 fill 的平均 forward return 均为负。v8 应继续 shadow，不允许直接升档。
+- v9 `quality_regime_candidate_v9_exec_state` 是新建 shadow 档，不是 promotion candidate。它不放松风控追收益，而是把 reserve pool 上游改成 capacity-safe 排序，并在 P2 broker 中加入 blocked-order 状态机。
+- v9 重点处理 2026-03-30、2026-04-07 这类买入不可交易和卖出阻塞集中爆发：blocked sell 会被记录为持续状态，达到阈值时可冻结新买入，避免把卖不掉的风险当作可释放现金/风险预算。
+- v9 的新增证据字段包括 `portfolio_rank_score`、`reserve_safe_score`、`reserve_capacity_score`、`blocked_sell_current_weight`、`blocked_exit_buy_freeze`、`blocked_exit_freeze_orders`、`blocked_state_max_consecutive_days` 等。v9 仍需要独立 60/90/120 P2 replay 后才可评价，不允许凭实现本身升档。
 
 请输出：
 A. 总体判断：这个项目更像真实可演进的量化平台，还是复杂回测工程？
@@ -66,7 +69,7 @@ B. 最严重的 5 个策略/回测/执行问题，按优先级排序。
 C. 对信号层、过滤层、排名层、组合层、执行层、治理层分别评价。
 D. 判断当前收益最可能来自真实 alpha、行业/小盘暴露、低容量偏差、执行口径残差，还是混合来源。
 E. 明确指出当前最可能的伪 alpha 来源。
-F. 审查 v7 方向是否正确，以及 v8 reserve pool 为什么只改善仓位却没有改善执行后收益。
+F. 审查 v7/v8 方向是否正确，以及 v9 capacity-safe reserve 和 blocked-order 状态机是否真正解决执行断点。
 G. 检查 promotion gate 是否足以阻止错误升档。
 H. 给出未来 2 周和 1 个月最应该做的具体改造，不要泛泛而谈。
 I. 如果你认为某些模块不可信或有重大偏差，请直接指出，不要迎合。

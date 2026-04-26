@@ -1,14 +1,14 @@
 # Nightly Memory Review Draft
 
-Generated at `2026-04-27 00:07:28` by `scripts/quant_memory_evolve.py`.
+Generated at `2026-04-27 07:50:01` by `scripts/quant_memory_evolve.py`.
 
 ## Summary
 
-- long_term_learning_entries: 10
+- long_term_learning_entries: 11
 - active_cards: 12
-- active_error_cards: 9
-- newly_promoted_active_hashes: 1f387fa177c59de7, 58967edab4e6aa66, a8edccf342ce5e8d
-- input_signature: `a6c89bd9a386c548`
+- active_error_cards: 11
+- newly_promoted_active_hashes: d2d97b9c2cdaa5cf
+- input_signature: `3614c0cae960be23`
 
 ## Review Questions
 
@@ -20,8 +20,10 @@ Generated at `2026-04-27 00:07:28` by `scripts/quant_memory_evolve.py`.
 ## Active Cards For Review
 
 - `3622f3b98422ad92` P2 replay can become invalid if a script-level rebalance path recomputes target weights (errors.md)
+- `b7e38c917b54913a` Blocked sells can create false buying power if not stateful (errors.md)
 - `a8edccf342ce5e8d` Shared daily fallback contaminates profile replay evidence (errors.md)
 - `d9112dec90546429` Promotion can pass strict gates over inconsistent target-weight evidence (errors.md)
+- `d2d97b9c2cdaa5cf` Capacity-safe reserves do not help when the executable pool collapses (errors.md)
 - `1f387fa177c59de7` Reserve pool can raise exposure while worsening realized losses (errors.md)
 - `bc9945e247e7990d` Low-invested candidates can look safer than they are (errors.md)
 - `e0d5e375adebd905` Next-day pretrade gates can leak execution outcomes into research selection (errors.md)
@@ -29,8 +31,6 @@ Generated at `2026-04-27 00:07:28` by `scripts/quant_memory_evolve.py`.
 - `2bb4cab621e09813` Expanding candidate count without primary-topN semantics creates micro-position drift (errors.md)
 - `9d75157e798d069f` Industry ranking penalties alone do not guarantee portfolio-level diversification (errors.md)
 - `58967edab4e6aa66` v8 improves invested weight but fails execution-alpha validation (learnings.md)
-- `74b1f655d7ed1108` P2 execution evidence must use the canonical broker path (learnings.md)
-- `52a0020f68bbb6cc` Promotion needs target-weight source and checksum evidence (learnings.md)
 
 ## Suggested Commands
 

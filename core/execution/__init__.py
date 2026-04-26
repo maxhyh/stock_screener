@@ -18,6 +18,9 @@ def create_broker(name: str, **kwargs) -> BrokerAdapter:
             fee_bps=kwargs["fee_bps"],
             slippage_bps=kwargs["slippage_bps"],
             stamp_tax_bps=kwargs["stamp_tax_bps"],
+            blocked_state_enabled=kwargs.get("blocked_state_enabled", True),
+            block_buy_on_exit_blocked=kwargs.get("block_buy_on_exit_blocked", False),
+            blocked_exit_freeze_min_weight=kwargs.get("blocked_exit_freeze_min_weight", 0.0),
         )
     if n in {"live", "real", "broker"}:
         return LiveBroker(

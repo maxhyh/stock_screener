@@ -17,9 +17,10 @@ This repository is an A-share daily quant research, backtest, paper execution, a
 
 - Capital assumption: RMB 1,000,000.
 - Main profile: `quality_regime`.
-- Active shadow profiles include `quality_regime_candidate_v6_liquidity_guard`, `quality_regime_candidate_v7_industry_balance`, and `quality_regime_candidate_v8_reserve_pool`.
+- Active shadow profiles include `quality_regime_candidate_v6_liquidity_guard`, `quality_regime_candidate_v7_industry_balance`, `quality_regime_candidate_v8_reserve_pool`, and `quality_regime_candidate_v9_exec_state`.
 - v7 is not promotable as of the latest review because long-window P2 NAV parity, effective target weight, and ADV hard caps did not pass.
-- v8 is an execution-repair shadow profile that adds reserve-pool replacement; it still needs fresh 60/90/120 P2 replay before promotion discussion.
+- v8 is an execution-repair shadow profile that added reserve-pool replacement and improved target-weight utilization, but its latest 60/90/120 P2 NAV/MDD and alpha attribution failed promotion quality.
+- v9 is an execution-credibility shadow profile focused on capacity-safe reserve generation and blocked-order state handling, not on loosening risk to chase return.
 
 ## Promotion Gate Summary
 

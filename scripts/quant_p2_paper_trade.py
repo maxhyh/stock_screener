@@ -87,6 +87,11 @@ def _load_default_profile_values() -> dict[str, float]:
         "optimizer_candidate_pool_max_n": 0,
         "reserve_candidate_count": 0,
         "reserve_reoptimize_rounds": 2,
+        "target_score_col": "",
+        "capacity_safe_reserve_enabled": False,
+        "blocked_state_enabled": True,
+        "block_buy_on_exit_blocked": False,
+        "blocked_exit_freeze_min_weight": 0.0,
         "impact_model": "sqrt",
         "impact_base_bps": 0.0,
         "impact_participation_bps": 0.0,
@@ -172,6 +177,42 @@ def _load_default_profile_values() -> dict[str, float]:
         defaults["reserve_candidate_count"] = int(float(p.get("reserve_candidate_count", defaults["reserve_candidate_count"])))
         defaults["reserve_reoptimize_rounds"] = int(
             float(p.get("reserve_reoptimize_rounds", defaults["reserve_reoptimize_rounds"]))
+        )
+        defaults["target_score_col"] = str(p.get("target_score_col", defaults["target_score_col"]) or "")
+        raw_capacity_safe = p.get("capacity_safe_reserve_enabled", defaults["capacity_safe_reserve_enabled"])
+        if isinstance(raw_capacity_safe, bool):
+            defaults["capacity_safe_reserve_enabled"] = raw_capacity_safe
+        else:
+            defaults["capacity_safe_reserve_enabled"] = str(raw_capacity_safe).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }
+        raw_block_state = p.get("blocked_state_enabled", defaults["blocked_state_enabled"])
+        if isinstance(raw_block_state, bool):
+            defaults["blocked_state_enabled"] = raw_block_state
+        else:
+            defaults["blocked_state_enabled"] = str(raw_block_state).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+        raw_block_buy = p.get("block_buy_on_exit_blocked", defaults["block_buy_on_exit_blocked"])
+        if isinstance(raw_block_buy, bool):
+            defaults["block_buy_on_exit_blocked"] = raw_block_buy
+        else:
+            defaults["block_buy_on_exit_blocked"] = str(raw_block_buy).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }
+        defaults["blocked_exit_freeze_min_weight"] = float(
+            p.get("blocked_exit_freeze_min_weight", defaults["blocked_exit_freeze_min_weight"])
         )
         defaults["impact_model"] = str(p.get("impact_model", defaults["impact_model"]))
         defaults["impact_base_bps"] = float(p.get("impact_base_bps", defaults["impact_base_bps"]))
@@ -452,7 +493,13 @@ def _assign_profile_target_weights(
 
     optimizer_mode = str(profile_cfg.get("optimizer_mode", "score_weight") or "score_weight").strip().lower()
     capacity_on = optimizer_mode in {"capacity_aware", "capacity_crowding", "capacity_crowding_aware"}
-    score_col = "重构分" if "重构分" in work.columns else ("综合分" if "综合分" in work.columns else "ML评分")
+    configured_score_col = str(profile_cfg.get("target_score_col", "") or "").strip()
+    if configured_score_col and configured_score_col in work.columns:
+        score_col = configured_score_col
+    elif _parse_bool_like(profile_cfg.get("capacity_safe_reserve_enabled", False), default=False) and "portfolio_rank_score" in work.columns:
+        score_col = "portfolio_rank_score"
+    else:
+        score_col = "重构分" if "重构分" in work.columns else ("综合分" if "综合分" in work.columns else "ML评分")
     if score_col not in work.columns:
         work[score_col] = np.linspace(1.0, 0.5, num=len(work))
     work["industry"] = work["代码"].astype(str).map(lambda x: industry_map.get(normalize_ts_code(x), "")).fillna("").astype(str)
@@ -764,6 +811,9 @@ def _rebalance(
         fee_bps=max(0.0, float(fee_bps)),
         slippage_bps=max(0.0, float(slippage_bps)),
         stamp_tax_bps=max(0.0, float(stamp_tax_bps)),
+        blocked_state_enabled=bool(DEFAULTS.get("blocked_state_enabled", True)),
+        block_buy_on_exit_blocked=bool(DEFAULTS.get("block_buy_on_exit_blocked", False)),
+        blocked_exit_freeze_min_weight=max(0.0, float(DEFAULTS.get("blocked_exit_freeze_min_weight", 0.0))),
     )
     result = broker.rebalance_on_state(
         state=state,
@@ -1137,6 +1187,9 @@ def main() -> int:
             fee_bps=max(0.0, float(args.fee_bps)),
             slippage_bps=max(0.0, float(args.slippage_bps)),
             stamp_tax_bps=max(0.0, float(args.stamp_tax_bps)),
+            blocked_state_enabled=bool(DEFAULTS.get("blocked_state_enabled", True)),
+            block_buy_on_exit_blocked=bool(DEFAULTS.get("block_buy_on_exit_blocked", False)),
+            blocked_exit_freeze_min_weight=max(0.0, float(DEFAULTS.get("blocked_exit_freeze_min_weight", 0.0))),
             live_mode=str(args.live_mode),
         )
     except ValueError as e:

@@ -1,6 +1,6 @@
 # 项目索引
 
-> 更新时间：2026-04-15
+> 更新时间：2026-04-27
 
 ## 1. 生产主入口
 
@@ -50,6 +50,7 @@
 - `core/execution/adapter.py`：执行抽象接口
 - `core/execution/paper_broker.py`：纸面执行
 - `core/execution/live_broker.py`：实盘/影子执行
+- `core/platform/portfolio_engine.py`：capacity/crowding-aware 组合权重引擎
 
 ### 编排层
 
@@ -58,7 +59,12 @@
 - `scripts/daily_verify.py`：收益验证
 - `scripts/quant_p1_analytics.py`：P1 风险分析
 - `scripts/quant_p2_paper_trade.py`：P2 执行
+- `scripts/quant_p2_rolling_replay.py`：P2 长窗滚动回放
+- `scripts/quant_p2_shadow_diagnosis.py`：P2 shadow 诊断
+- `scripts/quant_profile_promotion_review.py`：档位升档门禁
 - `scripts/quant_exec_consistency_report.py`：P3 一致性
+
+当前 profile 治理基线：`quality_regime` 仍为默认档；v7/v8/v9 均为 shadow 档。v9 聚焦 capacity-safe reserve 和 blocked-order 状态机，不能绕过 promotion gate。
 
 ### 展示层
 

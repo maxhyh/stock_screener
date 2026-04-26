@@ -45,9 +45,11 @@ Generated outputs in `output/`, logs in `logs/`, trained model binaries in `mode
 - Current default profile: `quality_regime`.
 - v7 shadow profile: `quality_regime_candidate_v7_industry_balance`.
 - v8 shadow profile: `quality_regime_candidate_v8_reserve_pool`.
+- v9 shadow profile: `quality_regime_candidate_v9_exec_state`.
 - v7 direction is judged correct on industry concentration, but it has not yet delivered enough execution-layer NAV improvement.
 - v7 should not be promoted now.
 - v8 implements reserve-pool execution repair: expanded candidates, capacity-clip redistribution, and P2 pretrade replacement for buy-side tradability/ADV/industry blocks. It is not promoted by default.
+- v9 extends v8 without loosening risk: upstream capacity-safe reserve ranking plus a blocked-order state machine that tracks trapped sells and can freeze new buys when blocked sell exposure is material. It is not promoted by default.
 
 ## 5. Latest v7 Evidence Summary
 
@@ -79,7 +81,22 @@ Fresh local v8 evidence was generated with profile-isolated daily signals, not s
 
 Interpretation: v8 is a more honest execution-repair profile because it raises deployed target weight versus v7, but it does not pass NAV/MDD, ADV, or executed-day evidence. It should remain shadow.
 
-## 7. Known Open Problems
+## 7. v9 Implementation Snapshot
+
+v9 was introduced to address the specific execution breaks exposed by v8, especially 2026-03-30 and 2026-04-07 style clusters:
+
+- Profile: `quality_regime_candidate_v9_exec_state`.
+- Risk posture: no promotion, no default switch, no loosened industry/ADV caps to chase return.
+- Reserve generation: `daily_ml_select.py` now emits `portfolio_rank_score`, `reserve_safe_score`, and `reserve_capacity_score` so the expanded reserve pool can prefer capacity-safe, liquid, less crowded candidates after the primary TopN.
+- P2 weighting: `quant_p2_paper_trade.py` can consume `portfolio_rank_score` via `target_score_col`, keeping v9 reserve ordering aligned with the upstream selection file.
+- Blocked-order state: `core/execution/paper_broker.py` now persists active blocked buy/sell state, tracks blocked sell exposure, blocked consecutive days, and blocked target weights.
+- Sell-side trap handling: if a blocked sell exceeds the configured threshold, v9 can freeze new buys with `blocked_exit_freeze` rather than treating failed sells as freed risk budget.
+- Replay evidence: `quant_p2_rolling_replay.py` now summarizes blocked-sell exposure, freeze days/orders/weights, and blocked-state max counts/consecutive days.
+- Smoke evidence: profile-isolated v9 daily files for `2026-03-27` and `2026-04-03` now keep the intended `40%` target posture after precision fixes, but two-step P2 smoke on `2026-03-30` and `2026-04-07` still produced zero fills with all kept buy orders blocked as `entry_not_tradable`. This validates observability, not strategy quality.
+
+This is an execution credibility change, not evidence of better alpha. v9 still needs profile-isolated daily rebuilds and 60/90/120 P2 replay before any promotion discussion.
+
+## 8. Known Open Problems
 
 The next review should be especially strict on these points:
 
@@ -91,8 +108,9 @@ The next review should be especially strict on these points:
 6. Profile promotion must reject candidates that win only by holding excess cash or benefiting from incomplete execution modeling.
 7. v8 reserve-pool evidence now shows better target-weight utilization but worse execution-layer NAV and drawdown; it should not be promoted.
 8. Profile-specific daily signal calendars are mandatory for fair replay. Shared daily fallback can contaminate candidate evidence.
+9. v9 must prove that capacity-safe reserves and blocked-order freezing reduce cash shortfall and false buying power without worsening realized NAV/MDD.
 
-## 8. What Expert Review Should Decide
+## 9. What Expert Review Should Decide
 
 The review should answer:
 
@@ -101,4 +119,4 @@ The review should answer:
 - Does the current backtest/paper chain avoid material look-ahead and execution overstatement?
 - Is the portfolio engine mature enough, or should the objective function be made more explicit?
 - Are the promotion gates hard enough for real A-share constraints?
-- Should v9 focus on capacity-safe reserve generation, blocked-order state machines, and alpha-quality repair before any alpha tuning or risk loosening?
+- Does v9's capacity-safe reserve generation and blocked-order state machine correctly address the 2026-03-30 / 2026-04-07 execution breaks before any alpha tuning or risk loosening?
