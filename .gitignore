@@ -28,3 +28,6 @@ models/**/*.pkl
 # Local environment files
 .env
 .env.*
+
+# Isolated Codex worktrees
+.worktrees/
