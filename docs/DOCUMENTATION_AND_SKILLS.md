@@ -113,3 +113,4 @@ Memory 是证据路由，不是 promotion 真相。promotion 仍必须由 `scrip
   - `memory/actives.md`
 - 若文档与 fresh P2/shadow/promotion evidence 冲突，fresh evidence 胜出，并应修正文档。
 - 若数据 manifest、PIT、复权、模型 horizon 或 lineage 存在 P0 问题，先冻结 profile/P2；此时 fresh P2 也不能覆盖上游数据可信度失败。
+- 当前修复路线以 `docs/superpowers/specs/2026-07-16-p0-evidence-remediation-design.md` 和 `docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md` 为准；阶段计划是执行清单，历史优化文档不能覆盖其停止条件。

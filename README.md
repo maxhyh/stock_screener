@@ -21,6 +21,7 @@
 - 操作流程：`docs/WORKFLOW.md`
 - 脚本分层：`scripts/README.md`
 - Codex 工程纪律：`skills/audit-a-share-quant-project/references/codex-engineering-discipline.md`
+- 当前 P0 修复总控计划：`docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`
 
 已退出主维护面的旧脚本实现已移入 `archive/scripts/`，避免与当前生产入口混在一起。
 
@@ -39,6 +40,8 @@
 当前 Git 仓库只跟踪源码、配置、schema、测试、文档和记忆系统。`data/` 大型行情文件、`output/` 回测与 P2 流水、`logs/` 日志、`models/*.pkl` 模型二进制均为本地运行产物，不随审查快照提交。
 
 当前默认档仍是 `quality_regime`。v7-v29 等候选档都只是历史 shadow/diagnostic 档，不代表已通过 promotion。旧 P2、回测和 raw-model 数值来自 ODS 迁移前的数据代际，只能用于理解工程演化，不能用于当前升档或收益判断。当前工作冻结 profile/P2 调参，优先修复复权研究价格、历史 PIT universe、官方涨跌停字段、manifest 强校验和模型 horizon/lineage 等 P0 证据问题。最新状态以 `config/quant_live_profiles.json`、同代际 artifacts、`memory/actives.md` 和 `memory/errors.md` 为准。
+
+独立审查进一步确认了三个新增 P0：forward label 必须在 fold 边界 purge/embargo；P2 不得删除并静默重算 daily 逐票目标权重；开盘成交与容量决策不得使用当日后续 high/low 或全日成交额。修复按五阶段总控计划推进，任何上游 gate 失败都停止下游 evidence rebuild。
 
 ## 📖 项目简介
 

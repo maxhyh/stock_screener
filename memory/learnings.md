@@ -1078,3 +1078,19 @@ State matching reduced one symptom but did not change the economic conclusion: t
 - evidence: After the ODS migration, the expert brief still suggested refreshing P2 before review even though adjusted-price, PIT-universe, official-limit, manifest, and model-horizon P0 issues invalidate downstream evidence. The review prompt was updated to treat v7-v29 numbers as historical-only and request a staged P0 repair and evidence-rebuild plan.
 - action: Ask experts to review data/PIT and model contracts before capacity/P2/promotion. Do not request or refresh downstream evidence merely to make a review package look current when its upstream generation is known to be invalid.
 - takeaway: Independent review is most useful when its questions respect causal evidence order.
+
+### 2026-07-16 | External review should be adjudicated finding by finding
+- tags: expert_review, governance, raw_model, execution, evidence_lineage
+- reusable: yes
+- confidence: high
+- evidence: Review of commit `8bb8a5e` independently confirmed adjusted-price, PIT, manifest, model-lineage and official-limit risks, and added three material gaps: labels crossing split boundaries, P2 dropping/recomputing daily per-name targets, and open fills using same-day high/low/full amount. The review's universal 7/7 positive absolute-return rule was rejected in favor of 7/7 method validity plus preregistered statistical fold stability.
+- action: Convert verified findings into phase gates and regression tests, but challenge reviewer-prescribed thresholds that are preferences rather than invariants. Record accepted, modified, and rejected advice in the design before implementation.
+- takeaway: Independent scrutiny improves the project only when code facts are separated from methodological opinion.
+
+### 2026-07-16 | P0 remediation must advance through explicit evidence states
+- tags: p0, evidence_state, ods, model, p2, promotion
+- reusable: yes
+- confidence: high
+- evidence: The approved remediation design defines `P0_BLOCKED`, `DIAGNOSTIC_ONLY`, `RAW_MODEL_ELIGIBLE`, `EXECUTION_ELIGIBLE`, and `PROMOTION_ELIGIBLE`, with five dependency-ordered implementation plans. Current ODS manifests may remain `freeze_pending`, so read access alone cannot imply formal evidence eligibility.
+- action: Execute the master plan in order and stop when a phase gate fails. Do not infer progress from `latest` filenames or module/test counts, and do not start profile/P2 performance work from a diagnostic-only generation.
+- takeaway: A machine-readable stop state is more valuable than another round of optimistic strategy tuning.

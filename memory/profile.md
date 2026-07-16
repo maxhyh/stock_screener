@@ -21,7 +21,10 @@ This repository is an A-share daily quant research, backtest, paper execution, a
 - The v7-v29 candidate line is retained as historical shadow/diagnostic evidence. None is approved for promotion.
 - All P2, backtest, and raw-model artifacts produced before the read-only ODS migration are historical diagnostics only and cannot support current return or promotion claims.
 - Current P0 work is upstream of profiles: adjusted research/label prices, historical point-in-time universe metadata, official limit/suspension fields, manifest enforcement, and model label-horizon/lineage alignment.
+- Independent review added binding P0 work: horizon-aware label purge/embargo, fail-closed feature/horizon inference, immutable daily-to-P2 per-name target lineage, and open-time execution without same-day high/low or full-day amount.
 - Do not create a new profile or run capacity/P2 optimization until the P0 data/model generation contract is repaired and a full seven-fold raw-universe gate passes on one frozen ODS generation.
+- Data/method contracts must be valid in all folds. Investment acceptance uses preregistered fold stability, worst-fold floors, residual alpha and statistical confidence; it does not mechanically require positive long-only absolute return in every fold.
+- Current implementation sequence is `docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`.
 - v7 is not promotable as of the latest review because long-window P2 NAV parity, effective target weight, and ADV hard caps did not pass.
 - v8 is an execution-repair shadow profile that added reserve-pool replacement and improved target-weight utilization, but its latest 60/90/120 P2 NAV/MDD and alpha attribution failed promotion quality.
 - v9 is an execution-credibility shadow profile focused on capacity-safe reserve generation and blocked-order state handling, not on loosening risk to chase return.

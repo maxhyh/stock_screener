@@ -98,6 +98,11 @@ Audit this repository as an A-share production trading system, not as a generic 
 - Require point-in-time instrument metadata for historical universe construction. A current or window-end instrument master is not a historical membership source.
 - Use official `pre_close`, upper limit, lower limit, suspension, ST, and board status when available; label heuristics and price ratios are fallback diagnostics, not authoritative execution truth.
 - Reject promotion evidence produced from a different data generation than its signals, model, backtest, or P2 ledger.
+- Require horizon-aware purge/embargo: no training or validation label outcome may cross into the next split.
+- Reject inference that fills missing model features with zero or continues across horizon/schema/generation mismatch.
+- Compare daily, pretrade, P2, and broker per-security target checksums. Coverage is not equality; any valid change needs an explicit parent-linked transform.
+- For open execution, do not use same-day high/low or full-day amount. Official limits and signal-date-known capacity inputs are authoritative.
+- Require data/method validity on every fold, but do not turn 7/7 positive long-only absolute return into a universal rule. Use preregistered stability, worst-fold, residual-alpha, confidence, and multiple-testing controls.
 
 ### Logic And Alpha
 

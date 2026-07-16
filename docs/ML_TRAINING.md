@@ -20,6 +20,8 @@ conda run -n stock python scripts/project_doctor.py
 - 训练、模型元数据、daily inference、raw-universe walk-forward 和 profile 必须使用同一 label mode/horizon。
 - 当前模型 artifact 若仍为 H=3，不得用于 H=8 profile 或任何 promotion evidence。
 - H=8/H=10 对照必须先通过完整 7-fold raw-universe gate，不能只看聚合均值。
+- 每个样本必须记录 `label_entry_date`、`label_exit_date`、`label_available_at`；train/validation/test 之间必须按 horizon purge 并使用预注册 embargo。
+- 数据和方法契约要求 7/7 folds 有效；投资 gate 使用预注册的 fold 稳定性、最差 fold 下限、残差 alpha 和统计置信度，不机械要求每折 long-only 绝对收益都为正。
 
 ## 3. 训练命令
 
@@ -48,6 +50,8 @@ ODS datasets/snapshots/manifest digests、research price mode、训练验证日�
 
 任一 fold 的绝对 top bucket 明显为负，或模型 horizon/lineage 不匹配时，停止
 capacity、P2 和新 profile 工作。正确结果是保留负证据，不是继续堆 overlay。
+
+详细修复步骤见 `docs/superpowers/plans/2026-07-16-p0-phase3-model-temporal-integrity.md`。
 
 ## 5. 每日推理
 

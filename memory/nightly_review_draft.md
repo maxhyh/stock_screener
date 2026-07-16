@@ -1,14 +1,14 @@
 # Nightly Memory Review Draft
 
-Generated at `2026-07-16 21:09:52` by `scripts/quant_memory_evolve.py`.
+Generated at `2026-07-16 22:14:13` by `scripts/quant_memory_evolve.py`.
 
 ## Summary
 
-- long_term_learning_entries: 118
+- long_term_learning_entries: 120
 - active_cards: 12
-- active_error_cards: 91
-- newly_promoted_active_hashes: none
-- input_signature: `9c58fe88b39a8e9e`
+- active_error_cards: 95
+- newly_promoted_active_hashes: 4585a28db177410c, a6b7734f80e2a5fb
+- input_signature: `25e5fff1521633b1`
 
 ## Review Questions
 
@@ -22,15 +22,15 @@ Generated at `2026-07-16 21:09:52` by `scripts/quant_memory_evolve.py`.
 - `ee42163aac326712` P2 reserve re-optimization can silently overrun upstream target weights (errors.md)
 - `804a2848958e0a57` Sell-trap clusters can be hidden by aggregate window metrics (errors.md)
 - `3622f3b98422ad92` P2 replay can become invalid if a script-level rebalance path recomputes target weights (errors.md)
+- `a6b7734f80e2a5fb` Checksum coverage does not prove daily-to-P2 target equality (errors.md)
 - `e3019ff439273b18` Execution limits must consume official pre-close and limit prices (errors.md)
+- `4585a28db177410c` Open-price fills cannot use the day's later high, low, or full amount (errors.md)
 - `4b41aa7a0fa41f82` P2 profile cap bugs make old reserve/exit-trap artifacts legacy evidence (errors.md)
 - `b1f22b18a20137c4` Invested-average style gates can manufacture low-risk cash exposure (errors.md)
 - `9427c1f1cf410cd5` Same row count can hide mismatched P2 evidence calendars (errors.md)
 - `e4c3c4cd6fdb5c30` Score-alpha and coverage pass can still fail P2 execution smoke (errors.md)
 - `defc2d7f975d27f4` Score-alpha pass can hide profile daily coverage gaps (errors.md)
 - `f66c4694e47d5355` Shared daily files can be stale/orphan artifacts when market bars are missing (errors.md)
-- `d58c1a9eb1723810` Target-score overrides can reduce losses by starving deployment (errors.md)
-- `7247b085026f5410` BJ-only shared daily files can masquerade as repeated P2 failures (errors.md)
 
 ## Suggested Commands
 

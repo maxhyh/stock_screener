@@ -59,6 +59,11 @@ Use this file to rebuild context quickly before a deep audit.
 
 ## Current Repo Behaviors Worth Verifying
 
+- Forward labels are purged at split boundaries and feature selection is train-only.
+- Missing model features or horizon/generation mismatches fail before signal output.
+- P2 does not delete/recompute daily per-name targets without an explicit transform.
+- Open fills use official open-time state, not the day's later high/low or full-day amount.
+- Raw-model gate validity is 7/7 for data/method contracts; investment stability is assessed with preregistered fold and statistical criteria rather than a universal 7/7 absolute-profit rule.
 - Project commands run in the `stock` Conda environment.
 - The shared ODS root is read-only and selected snapshots are manifest-backed.
 - Research labels use adjusted prices while paper execution uses raw prices.

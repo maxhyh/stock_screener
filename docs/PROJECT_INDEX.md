@@ -32,6 +32,8 @@
 
 ## 3. 代码主链路
 
+当前代码主链路处于 `P0_BLOCKED` 修复阶段。实施顺序固定为 ODS generation/calendar、PIT/价格、模型时间契约、target/execution、证据重建；详见 `docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`。在 Phase 3 raw-universe gate 和 Phase 4 execution integrity 通过前，不运行新的 profile/capacity/P2 收益实验。
+
 ### 数据层
 
 - `core/data/ashare_ods_loader.py` / `core/data/market_data_gateway.py`：共享 A 股 ODS 的只读入口；默认读取 `ASHARE_DATA_ROOT` 或 `/Users/max/Data/ashare-source-data`，按 `trade_date/snapshot` 选择最新 snapshot，并记录请求窗口、价格口径、BJ/9 过滤和 snapshot digest。

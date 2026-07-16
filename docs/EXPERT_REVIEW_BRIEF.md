@@ -19,6 +19,10 @@ The current local audit identified unresolved P0 risks that the external reviewe
 
 Until these issues are fixed and the ODS-generation raw-model and 60/90/120 P2 evidence are regenerated, the project should be treated as research/paper infrastructure, not an investable strategy.
 
+## Post-Review Adjudication
+
+The independent review was accepted on adjusted prices, PIT metadata, manifest enforcement, label-boundary purge/embargo, fail-closed model contracts, daily-to-P2 target lineage, open-time information, hard-filter fallback, sell-trap backtest semantics, and global promotion evidence health. Its proposed universal 7/7 positive absolute-return rule was not adopted: data/method contracts must pass 7/7, while investment acceptance uses preregistered fold stability, worst-fold floors, residual alpha, confidence intervals, and multiple-experiment controls. Bars-derived calendars remain diagnostic-only; formal evidence requires authoritative coverage. The approved remediation design and master plan live under `docs/superpowers/specs/` and `docs/superpowers/plans/`.
+
 ## Current Freshness Note
 
 This brief is a code-and-methodology review package, not a promotion artifact. Do not refresh P2, shadow, or promotion evidence before the unresolved adjusted-price, PIT-universe, official-limit, manifest-lineage, and model-horizon P0 issues are fixed. Refresh `memory/actives.md` before review, then rebuild raw-universe and downstream evidence only after the P0 generation contract passes.

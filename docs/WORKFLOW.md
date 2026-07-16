@@ -4,6 +4,10 @@
 > ODS 读取，项目不会下载、补数或修改数据源。复权、PIT universe、官方交易约束
 > 和模型 lineage P0 闭环前，不新建 profile、不刷新 P2/promotion 证据。本文后部
 > 的旧回测/profile 命令保留作历史操作参考，不代表当前推荐执行。
+>
+> 当前修复入口：`docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`。
+> 新增硬停止条件包括 label outcome 跨 split、模型契约 fail-open、daily/P2 target
+> checksum 无声明变化，以及开盘决策使用当日 high/low/full-day amount。
 
 > 说明：
 > - 看“项目结构/代码入口”请转到 `docs/PROJECT_INDEX.md`

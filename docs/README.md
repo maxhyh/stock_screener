@@ -10,6 +10,8 @@
 - 每日操作步骤：看 `docs/WORKFLOW.md`
 - 脚本分层与用途：看 `scripts/README.md`
 - Codex 工程纪律：看 `skills/audit-a-share-quant-project/references/codex-engineering-discipline.md`
+- 当前 P0 修复设计：看 `superpowers/specs/2026-07-16-p0-evidence-remediation-design.md`
+- 当前 P0 修复总控计划：看 `superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`
 
 ## 文档分层
 

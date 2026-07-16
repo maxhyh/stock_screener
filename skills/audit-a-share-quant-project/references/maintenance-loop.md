@@ -30,6 +30,8 @@ Continuously improve the repo's trading realism, stability, and maintainability 
    `quant_portfolio_backtest.py`
    `pretrade.py`
    `paper_broker.py`
+   Before any model or execution maintenance, also check the current phase gate in
+   `docs/superpowers/plans/2026-07-16-p0-evidence-remediation-master.md`.
 5. Identify the highest-leverage issue in one of these buckets:
    logic bias
    execution realism

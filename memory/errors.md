@@ -817,3 +817,37 @@ Do not convert a "less negative and above pool" fold2 result into capacity/P2/pr
 - severity: critical
 - mitigation: Use ODS `pre_close`, `up_limit`, and `down_limit` for execution tradability. Fixed board/ST ratios are fallback-only when official fields are absent.
 - evidence: `load_execution_bars` constructs `prev_close` from prior raw close, while `PaperBroker` infers locked limits from a fixed ratio. This can misclassify ex-rights days and status/board transitions even though ODS already provides official daily limit fields.
+
+### 2026-07-16 | Forward-label outcomes must not cross walk-forward split boundaries
+- tags: raw_model, labels, purge, embargo, lookahead
+- status: active
+- severity: critical
+- mitigation: Persist label entry/exit/availability dates and purge every train or validation row whose outcome reaches the next split. Use a preregistered horizon-aware embargo in training and raw-universe diagnostics.
+- evidence: Training and `quant_raw_model_walkforward_diagnosis.py` construct future open-to-open labels on the full frame, then split by signal date without excluding rows whose exit occurs in validation/test.
+
+Cross-boundary outcomes make a historical fold train on labels unavailable at its declared cutoff, even when feature timestamps are clean.
+
+### 2026-07-16 | Checksum coverage does not prove daily-to-P2 target equality
+- tags: target_weight, p2, evidence_lineage, checksum
+- status: active
+- severity: critical
+- mitigation: Preserve the immutable daily per-security target instruction. Every pretrade/reserve/lot/broker change must emit a parent checksum, transform reason, and child checksum; promotion must compare equality or a complete transform chain.
+- evidence: `quant_p2_paper_trade.py` records the upstream budget/checksum, drops per-name target fields, then calls `_assign_profile_target_weights`; rolling evidence can report checksum coverage without proving broker targets equal daily targets.
+
+A downstream recomputation may be a valid execution transform, but it is a different portfolio unless explicitly linked and attributed.
+
+### 2026-07-16 | Open-price fills cannot use the day's later high, low, or full amount
+- tags: execution, lookahead, price_limits, adv, p2
+- status: active
+- severity: critical
+- mitigation: Use official pre-close/up-limit/down-limit and only open-time observable state for an open-order model. Capacity at the open must use information through signal date; full-day high/low/amount are post-trade TCA inputs.
+- evidence: `PaperBroker` checks same-day high/low to decide whether a limit-open order is tradable while filling at open, and `load_execution_bars` computes rolling amount including the execution day.
+
+If intraday unlock execution is desired, it requires timestamped intraday data and a later fill price, not an open-price fill.
+
+### 2026-07-16 | A universal 7-of-7 absolute-profit gate can become gate overfitting
+- tags: raw_model, fold_stability, governance, overfitting
+- status: active
+- severity: high
+- mitigation: Require data/method contracts in every fold, but preregister investment thresholds using directional stability, worst-fold floors, residual alpha, confidence intervals and multiple-experiment controls. Do not tune models until every long-only fold is positive merely to satisfy an arbitrary gate.
+- evidence: External review correctly rejected the current 50% fold-pass rule but proposed that every fold simultaneously have positive absolute top return, RankIC and spreads. That criterion is not a universal requirement for a regime-aware long-only strategy and can incentivize repeated fitting to the worst fold.

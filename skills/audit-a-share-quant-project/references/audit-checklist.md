@@ -24,6 +24,8 @@ Use this checklist when the user asks for a deep audit, optimization pass, or ar
 - Check filters for ST, suspension, limit-up entry lock, limit-down exit lock, and BJ exclusions.
 - Confirm high-coverage gates prevent low-sample fake stability.
 - Confirm the model artifact horizon and label contract match the active profile. A horizon mismatch is a hard stop, not a warning.
+- Confirm `label_exit_date` and `label_available_at` do not cross train/validation/test boundaries; require horizon-aware purge/embargo.
+- Confirm model inference fails on missing/reordered/wrong-dtype features instead of zero-filling.
 
 ## 3. Performance
 
@@ -55,6 +57,8 @@ Use this checklist when the user asks for a deep audit, optimization pass, or ar
 - Check metadata refresh and fallback chains for silent degradation.
 - Verify orchestration does not continue into P2 or P3 after critical gating failures.
 - Verify unresolved P0 data, PIT, label, or model-lineage failures block new profile creation and P2 promotion work.
+- Verify daily/P2/broker target checksums are equal or connected by an explicit parent-child transform.
+- Verify open execution ignores same-day high/low and full-day amount, and trapped positions remain in gross/industry/style budgets.
 - Add regression tests for any confirmed production-risk fix.
 
 ## Response Shape
