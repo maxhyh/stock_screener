@@ -1070,3 +1070,11 @@ State matching reduced one symptom but did not change the economic conclusion: t
 - evidence: The documentation audit found active deployment/training/cron guidance still referencing `.venv`, legacy downloaders, H=3, and pre-ODS profile evidence after production data had moved to read-only ODS. The repo skill also listed the retired updater as a production entry point, and generated active memory referenced the deleted local parquet calendar.
 - action: Keep active docs, the repo-local audit skill, and memory aligned on Conda `stock`, read-only manifest-backed ODS, adjusted-research/raw-execution price separation, PIT metadata, official execution limits, and evidence-generation identity. Preserve old commands and results only behind explicit historical labels.
 - takeaway: Governance text is part of the execution control plane; stale instructions can recreate an already-retired evidence path.
+
+### 2026-07-16 | Expert review must follow the evidence dependency graph
+- tags: expert_review, governance, ods, model_lineage, promotion
+- reusable: yes
+- confidence: high
+- evidence: After the ODS migration, the expert brief still suggested refreshing P2 before review even though adjusted-price, PIT-universe, official-limit, manifest, and model-horizon P0 issues invalidate downstream evidence. The review prompt was updated to treat v7-v29 numbers as historical-only and request a staged P0 repair and evidence-rebuild plan.
+- action: Ask experts to review data/PIT and model contracts before capacity/P2/promotion. Do not request or refresh downstream evidence merely to make a review package look current when its upstream generation is known to be invalid.
+- takeaway: Independent review is most useful when its questions respect causal evidence order.

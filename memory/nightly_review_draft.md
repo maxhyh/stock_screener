@@ -1,14 +1,14 @@
 # Nightly Memory Review Draft
 
-Generated at `2026-07-16 21:01:53` by `scripts/quant_memory_evolve.py`.
+Generated at `2026-07-16 21:09:52` by `scripts/quant_memory_evolve.py`.
 
 ## Summary
 
-- long_term_learning_entries: 117
+- long_term_learning_entries: 118
 - active_cards: 12
 - active_error_cards: 91
 - newly_promoted_active_hashes: none
-- input_signature: `f57eff47d61133c7`
+- input_signature: `9c58fe88b39a8e9e`
 
 ## Review Questions
 

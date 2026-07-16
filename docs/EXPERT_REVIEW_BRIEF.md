@@ -21,7 +21,7 @@ Until these issues are fixed and the ODS-generation raw-model and 60/90/120 P2 e
 
 ## Current Freshness Note
 
-This brief is a review package, not a promotion artifact. Before sending it to an external expert, refresh the latest P2 rolling replay, shadow diagnosis, promotion review, and `memory/actives.md`.
+This brief is a code-and-methodology review package, not a promotion artifact. Do not refresh P2, shadow, or promotion evidence before the unresolved adjusted-price, PIT-universe, official-limit, manifest-lineage, and model-horizon P0 issues are fixed. Refresh `memory/actives.md` before review, then rebuild raw-universe and downstream evidence only after the P0 generation contract passes.
 
 Current operating state:
 
@@ -31,6 +31,8 @@ Current operating state:
 - Recent evidence after v18-v26 suggests the main unresolved issue is not a simple ADV-only bottleneck. The active risks are post-filter alpha quality, target-weight lineage, style-gate口径, cash drag, capacity fallback illusions, and T+1 sell-trap behavior.
 - v23's NAV-weighted style exposure reduced executable-pool halts and raised target utilization, but worsened NAV/MDD under higher deployment, so it is diagnostic only.
 - v25/v26 tested whether positive liquidity-score spread could survive target-weight construction. v25's apparent 60-day P2 improvement was mostly low exposure; v26 deployed more credibly after NAV-weighted style exposure, but after capacity fallback repair it failed the hardened score-alpha gate.
+
+The detailed v7-v29 evidence sections below are retained only to show the evolution of failure modes and controls. They are not current return claims, cannot be compared with future ODS-generation results, and must not be used to recommend promotion.
 
 ## 0. Review Escalation Policy
 
