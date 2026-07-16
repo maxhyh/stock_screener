@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "last_run_at": "2026-07-16T20:46:45+08:00",
-  "input_signature": "437a0e4c49972fed",
+  "last_run_at": "2026-07-16T21:01:53+08:00",
+  "input_signature": "f57eff47d61133c7",
   "active_hashes": [
     "ee42163aac326712",
     "804a2848958e0a57",
@@ -12,13 +12,11 @@
     "9427c1f1cf410cd5",
     "e4c3c4cd6fdb5c30",
     "defc2d7f975d27f4",
-    "750f1097d77c800a",
+    "f66c4694e47d5355",
     "d58c1a9eb1723810",
     "7247b085026f5410"
   ],
-  "new_active_hashes": [
-    "e3019ff439273b18"
-  ],
-  "learning_entry_count": 116,
+  "new_active_hashes": [],
+  "learning_entry_count": 117,
   "error_entry_count": 91
 }

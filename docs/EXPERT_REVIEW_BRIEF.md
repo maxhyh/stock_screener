@@ -26,7 +26,8 @@ This brief is a review package, not a promotion artifact. Before sending it to a
 Current operating state:
 
 - Default profile remains `quality_regime`.
-- v7-v26 are shadow/diagnostic profiles unless a formal promotion review says otherwise.
+- v7-v29 are historical shadow/diagnostic profiles unless a formal promotion review says otherwise.
+- All P2, backtest, and raw-model numbers produced before the read-only ODS migration are historical diagnostics only. They must not be compared with post-migration evidence or used for promotion.
 - Recent evidence after v18-v26 suggests the main unresolved issue is not a simple ADV-only bottleneck. The active risks are post-filter alpha quality, target-weight lineage, style-gate口径, cash drag, capacity fallback illusions, and T+1 sell-trap behavior.
 - v23's NAV-weighted style exposure reduced executable-pool halts and raised target utilization, but worsened NAV/MDD under higher deployment, so it is diagnostic only.
 - v25/v26 tested whether positive liquidity-score spread could survive target-weight construction. v25's apparent 60-day P2 improvement was mostly low exposure; v26 deployed more credibly after NAV-weighted style exposure, but after capacity fallback repair it failed the hardened score-alpha gate.

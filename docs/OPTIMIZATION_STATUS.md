@@ -1,5 +1,9 @@
 # 项目优化进度清单（P1/P2/P3）
 
+> **历史文档。** 本文记录 ODS 迁移前的策略与执行实验，不代表当前可复现
+> evidence。当前状态以 `memory/profile.md`、`memory/actives.md`、
+> `docs/EXPERT_REVIEW_BRIEF.md` 和同代际 artifacts 为准。
+
 > 更新时间：2026-04-24 11:05
 > 说明：本清单用于回答两个问题
 > 1) 这轮到底完成了什么

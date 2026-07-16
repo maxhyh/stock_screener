@@ -1062,3 +1062,11 @@ State matching reduced one symptom but did not change the economic conclusion: t
 - evidence: The newest local model predates the ODS migration and has no embedded market-data snapshot or price-mode lineage. Existing raw-model, P2, and promotion artifacts were generated against the retired local parquet generation.
 - action: Treat pre-ODS artifacts as historical diagnosis only. Rebuild raw-universe model evidence first, then profile-isolated daily signals and 60/90/120 P2 evidence from one frozen ODS generation.
 - takeaway: A data-source generation break resets promotion evidence even when code paths and column names remain compatible.
+
+### 2026-07-16 | Active documentation, skills, and memory must share the same evidence contract
+- tags: documentation, skills, memory, ods, governance
+- reusable: yes
+- confidence: high
+- evidence: The documentation audit found active deployment/training/cron guidance still referencing `.venv`, legacy downloaders, H=3, and pre-ODS profile evidence after production data had moved to read-only ODS. The repo skill also listed the retired updater as a production entry point, and generated active memory referenced the deleted local parquet calendar.
+- action: Keep active docs, the repo-local audit skill, and memory aligned on Conda `stock`, read-only manifest-backed ODS, adjusted-research/raw-execution price separation, PIT metadata, official execution limits, and evidence-generation identity. Preserve old commands and results only behind explicit historical labels.
+- takeaway: Governance text is part of the execution control plane; stale instructions can recreate an already-retired evidence path.

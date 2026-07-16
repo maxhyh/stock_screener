@@ -1,5 +1,14 @@
 # MFTS 本地定时任务指南
 
+> **状态：暂停安装。** 本文保留为历史自动化设计参考。当前只读 ODS 迁移后的
+> 复权、PIT、官方交易约束和模型 lineage P0 问题尚未闭环，不应安装旧 cron，
+> 不应自动下载数据、重训模型、刷新 P2 或 promotion evidence。
+
+未来恢复定时任务时，必须使用
+`/opt/homebrew/Caskroom/miniforge/base/envs/stock/bin/python`，只读
+`/Users/max/Data/ashare-source-data/ods`，并先通过 `scripts/project_doctor.py`、
+manifest/PIT/data-generation gate。以下命令和时间表在恢复前均不属于生产建议。
+
 当前推荐把 `scripts/daily_all.py` 作为日常生产编排入口，而不是把
 `daily_incremental_update.py`、`daily_ml_select.py`、`daily_verify.py`、
 `quant_p2_paper_trade.py` 这些脚本拆开分别调度。原因很简单：

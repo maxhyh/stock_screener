@@ -18,7 +18,10 @@ This repository is an A-share daily quant research, backtest, paper execution, a
 
 - Capital assumption: RMB 1,000,000.
 - Main profile: `quality_regime`.
-- Active shadow/diagnostic profiles include the v7-v26 candidate line. Recent work has focused on reserve pools, blocked-order state, score-alpha prechecks, style-gate口径, holiday-gap attribution, target-score experiments, capacity fallback repair, and cash-drag detection.
+- The v7-v29 candidate line is retained as historical shadow/diagnostic evidence. None is approved for promotion.
+- All P2, backtest, and raw-model artifacts produced before the read-only ODS migration are historical diagnostics only and cannot support current return or promotion claims.
+- Current P0 work is upstream of profiles: adjusted research/label prices, historical point-in-time universe metadata, official limit/suspension fields, manifest enforcement, and model label-horizon/lineage alignment.
+- Do not create a new profile or run capacity/P2 optimization until the P0 data/model generation contract is repaired and a full seven-fold raw-universe gate passes on one frozen ODS generation.
 - v7 is not promotable as of the latest review because long-window P2 NAV parity, effective target weight, and ADV hard caps did not pass.
 - v8 is an execution-repair shadow profile that added reserve-pool replacement and improved target-weight utilization, but its latest 60/90/120 P2 NAV/MDD and alpha attribution failed promotion quality.
 - v9 is an execution-credibility shadow profile focused on capacity-safe reserve generation and blocked-order state handling, not on loosening risk to chase return.

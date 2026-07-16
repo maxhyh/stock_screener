@@ -2,7 +2,17 @@
 
 Use this checklist when the user asks for a deep audit, optimization pass, or architecture review.
 
-## 1. Logic And Alpha
+## 1. Runtime, Data, And Evidence Generation
+
+- Run project commands with `conda run -n stock` or the equivalent activated `stock` environment.
+- Confirm `ASHARE_DATA_ROOT` resolves to the read-only shared ODS tree.
+- Confirm every selected partition has a visible, valid manifest and a recorded digest.
+- Confirm historical instrument, ST, board, suspension, and listing status are point-in-time.
+- Confirm research returns and labels use adjusted prices; execution uses raw prices and official trade constraints.
+- Confirm signal, model, backtest, P2, and promotion artifacts share the same data-generation identity.
+- Treat pre-ODS artifacts as historical-only evidence.
+
+## 2. Logic And Alpha
 
 - Verify factor computation uses only information available at signal time.
 - Inspect `shift(-n)`, forward returns, and future exit-price lookup.
@@ -13,8 +23,9 @@ Use this checklist when the user asks for a deep audit, optimization pass, or ar
   `quant_portfolio_backtest.py`
 - Check filters for ST, suspension, limit-up entry lock, limit-down exit lock, and BJ exclusions.
 - Confirm high-coverage gates prevent low-sample fake stability.
+- Confirm the model artifact horizon and label contract match the active profile. A horizon mismatch is a hard stop, not a warning.
 
-## 2. Performance
+## 3. Performance
 
 - Count and inspect:
   `iterrows(`
@@ -25,7 +36,7 @@ Use this checklist when the user asks for a deep audit, optimization pass, or ar
 - Prefer vectorized grouped calculations and windowed parquet reads.
 - Focus first on files in the production path, not on report-only pages.
 
-## 3. Financial Engineering
+## 4. Financial Engineering
 
 - Confirm sell-side stamp duty only.
 - Confirm slippage and fee side are symmetric with the intended execution model.
@@ -38,11 +49,12 @@ Use this checklist when the user asks for a deep audit, optimization pass, or ar
   block rate
   realized exposure
 
-## 4. Robustness
+## 5. Robustness
 
 - Review broad `except Exception` blocks and decide whether they should fail fast.
 - Check metadata refresh and fallback chains for silent degradation.
 - Verify orchestration does not continue into P2 or P3 after critical gating failures.
+- Verify unresolved P0 data, PIT, label, or model-lineage failures block new profile creation and P2 promotion work.
 - Add regression tests for any confirmed production-risk fix.
 
 ## Response Shape

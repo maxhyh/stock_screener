@@ -1,5 +1,9 @@
 # 量化平台化重构蓝图（A股）
 
+> **历史文档。** 文中的 `data/daily_all_5y.parquet` 和旧数据更新链已退役。
+> 当前生产读取契约见 `core/data/ashare_ods_loader.py`、
+> `core/data/market_data_gateway.py` 和 `docs/DEPLOYMENT.md`。
+
 > 更新时间：2026-04-15 07:36
 > 目标：从“选股脚本集合”演进到“可回测、可执行、可审计、可风控”的量化平台。
 > 平台完成度（当前评估）：

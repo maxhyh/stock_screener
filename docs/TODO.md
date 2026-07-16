@@ -1,5 +1,8 @@
 # MFTS Stock Screener - TODO List
 
+> **历史文档。** 已完成勾选和旧环境/下载器/profile 计划只用于追溯，不代表
+> 当前路线图。当前优先级以 `memory/profile.md` 和 `memory/actives.md` 为准。
+
 > 注：本文件包含历史记录（含云服务器阶段事项）。当前执行以本地部署流程为准。
 
 ## 项目进度概览

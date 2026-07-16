@@ -4,12 +4,12 @@
 
 ## 快速导航
 
-- 日常生产入口：`python scripts/daily_all.py`
+- 日常生产入口：`conda run -n stock python scripts/daily_all.py`
 - 一键启动前端：`scripts/start_web.sh`
-- 数据可用性检查：`python scripts/project_doctor.py`
-- 单独 ML 推荐：`python scripts/daily_ml_select.py`
-- 规则扫描：`python core/mfts_screener.py`
-- Web 查看：`python web/app.py`
+- 数据可用性检查：`conda run -n stock python scripts/project_doctor.py`
+- 单独 ML 推荐：`conda run -n stock python scripts/daily_ml_select.py`
+- 规则扫描：`conda run -n stock python core/mfts_screener.py`
+- Web 查看：`scripts/start_web.sh`
 
 建议配合以下索引一起看：
 
@@ -38,7 +38,7 @@
 
 当前 Git 仓库只跟踪源码、配置、schema、测试、文档和记忆系统。`data/` 大型行情文件、`output/` 回测与 P2 流水、`logs/` 日志、`models/*.pkl` 模型二进制均为本地运行产物，不随审查快照提交。
 
-当前默认档仍是 `quality_regime`。v7-v26 等候选档都只是 shadow/diagnostic 档，不代表已通过 promotion。近期结论是：执行可信链路持续提升，但收益仍未稳定穿透到 P2 执行层；不要把低仓位、空池、强风控导致的低回撤解释为 alpha。v24 条件化 holiday-gap cap 覆盖率通过但 score-alpha gate 失败；v25 liquidity target score 的 60 日 P2 改善主要来自低仓少亏；v26 修复 style 口径和 capacity fallback 后被加硬 score-alpha gate 拒绝。最新状态以 `config/quant_live_profiles.json`、最新 P2/shadow/promotion artifacts、`memory/actives.md` 和 `memory/errors.md` 为准。
+当前默认档仍是 `quality_regime`。v7-v29 等候选档都只是历史 shadow/diagnostic 档，不代表已通过 promotion。旧 P2、回测和 raw-model 数值来自 ODS 迁移前的数据代际，只能用于理解工程演化，不能用于当前升档或收益判断。当前工作冻结 profile/P2 调参，优先修复复权研究价格、历史 PIT universe、官方涨跌停字段、manifest 强校验和模型 horizon/lineage 等 P0 证据问题。最新状态以 `config/quant_live_profiles.json`、同代际 artifacts、`memory/actives.md` 和 `memory/errors.md` 为准。
 
 ## 📖 项目简介
 

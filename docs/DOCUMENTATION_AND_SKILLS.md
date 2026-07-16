@@ -1,6 +1,6 @@
 # 文档与 Skill 体系审查
 
-> 更新时间：2026-04-28
+> 更新时间：2026-07-16
 
 ## 1. 当前结论
 
@@ -10,10 +10,10 @@
 
 这个设计是合理的。当前项目的大多数维护任务都围绕同一条 A 股量化链路展开：数据、信号、回测、组合、P2 执行、shadow 诊断、promotion gate、memory。继续保留一个 repo-specific skill，比拆成多个互相重叠的 skill 更稳。
 
-当前没有发现仓库内多个 skill 重复触发或互相冲突的问题。但文档侧存在两类风险：
+当前没有发现仓库内多个 skill 重复触发或互相冲突的问题。项目 Skill 已统一为 `stock` Conda 环境、只读 ODS 数据源和数据代际优先审查。文档侧仍需防范两类风险：
 
-- 部分早期文档仍保留 `balanced` 默认档、MFTS v6.1 单一选股系统等历史描述。
-- `README.md`、`docs/WORKFLOW.md`、`docs/OPTIMIZATION_STATUS.md`、`docs/EXPERT_REVIEW_BRIEF.md` 都含有策略状态信息，容易出现新旧证据并存。
+- 部分早期文档保留旧下载器、本地 parquet、`.venv`、早期 profile 和 MFTS v6.1 等历史描述。
+- ODS 迁移前的 P2、回测和 raw-model 数值仍存在于历史文档，容易被误当成当前可比证据。
 
 处理原则：文档入口要分工清楚，策略事实以最新 artifacts、`config/quant_live_profiles.json`、promotion review 和 memory 为准；历史优化文档只作为背景，不作为当前 promotion 依据。
 
@@ -21,13 +21,15 @@
 
 遇到冲突时，按这个顺序判断：
 
-1. 最新本地 artifacts：P2 rolling replay、shadow diagnosis、promotion review、测试结果。
-2. `config/quant_live_profiles.json`：profile 定义和当前 `default_profile`。
-3. `memory/profile.md`、`memory/actives.md`、`memory/errors.md`：当前操作约束和已知陷阱。
-4. `AGENTS.md`：agent 操作规则。
-5. `docs/PROJECT_INDEX.md`、`docs/README.md`：仓库结构和文档导航。
-6. `docs/EXPERT_REVIEW_BRIEF.md`、`docs/EXPERT_REVIEW_PROMPT.md`：外部审查包，提交给专家前必须刷新。
-7. `docs/OPTIMIZATION_STATUS.md`、`docs/TODO.md`、`docs/MFTS_OPTIMIZATION.md`：历史优化记录，不能直接当作当前状态。
+1. 当前只读 ODS manifests、数据质量检查和同代际 artifact lineage。
+2. 当前模型的 label/horizon/feature schema 与 raw-universe walk-forward 证据。
+3. 最新同代际 artifacts：P2 rolling replay、shadow diagnosis、promotion review、测试结果。
+4. `config/quant_live_profiles.json`：profile 定义和当前 `default_profile`。
+5. `memory/profile.md`、`memory/actives.md`、`memory/errors.md`：当前操作约束和已知陷阱。
+6. `AGENTS.md`：agent 操作规则。
+7. `docs/PROJECT_INDEX.md`、`docs/README.md`：仓库结构和文档导航。
+8. `docs/EXPERT_REVIEW_BRIEF.md`、`docs/EXPERT_REVIEW_PROMPT.md`：外部审查包，提交给专家前必须刷新。
+9. `docs/OPTIMIZATION_STATUS.md`、`docs/TODO.md`、`docs/MFTS_OPTIMIZATION.md`：历史优化记录，不能直接当作当前状态。
 
 Memory 是证据路由，不是 promotion 真相。promotion 仍必须由 `scripts/quant_profile_promotion_review.py` 和生成 artifacts 决定。
 
@@ -81,6 +83,9 @@ Memory 是证据路由，不是 promotion 真相。promotion 仍必须由 `scrip
 - 早期文档中的 `balanced` 默认档描述已过期；当前 `default_profile` 是 `quality_regime`。
 - 早期“当前 holding_days=3”描述已过期；当前 `quality_regime.holding_days=8`。
 - skill 目录中的 Python 缓存产物不属于 skill 内容，应保持清理。
+- 旧 `daily_incremental_update.py`、`data/download_5y_data.py` 和 `data/daily_all_5y.parquet` 已退出生产数据链；当前只读入口是 `core/data/ashare_ods_loader.py` 与 `core/data/market_data_gateway.py`。
+- 项目默认 Python 环境统一为 Conda `stock`，活动文档不再推荐 `.venv`。
+- ODS 迁移前 artifacts 被标记为历史诊断，不能与迁移后的证据混合用于 promotion。
 
 ## 6. 文档职责边界
 
@@ -107,3 +112,4 @@ Memory 是证据路由，不是 promotion 真相。promotion 仍必须由 `scrip
   - `docs/PROJECT_INDEX.md`
   - `memory/actives.md`
 - 若文档与 fresh P2/shadow/promotion evidence 冲突，fresh evidence 胜出，并应修正文档。
+- 若数据 manifest、PIT、复权、模型 horizon 或 lineage 存在 P0 问题，先冻结 profile/P2；此时 fresh P2 也不能覆盖上游数据可信度失败。

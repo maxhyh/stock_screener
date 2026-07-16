@@ -1,5 +1,10 @@
 # MFTS 选股系统 - 操作流程
 
+> **当前安全边界（2026-07-16）：** 默认环境为 Conda `stock`；数据仅从共享
+> ODS 读取，项目不会下载、补数或修改数据源。复权、PIT universe、官方交易约束
+> 和模型 lineage P0 闭环前，不新建 profile、不刷新 P2/promotion 证据。本文后部
+> 的旧回测/profile 命令保留作历史操作参考，不代表当前推荐执行。
+
 > 说明：
 > - 看“项目结构/代码入口”请转到 `docs/PROJECT_INDEX.md`
 > - 看“文档去哪找”请转到 `docs/README.md`
@@ -23,13 +28,13 @@
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Step 2: 运行一键更新脚本                                 │
+│  Step 2: 运行只读 ODS 编排                               │
 │  $ python scripts/daily_all.py                          │
 │                                                         │
 │  自动执行:                                               │
-│  ├── 增量数据更新 (从东方财富获取)                         │
+│  ├── 检查共享 ODS 覆盖和 lineage                          │
 │  ├── MFTS 规则选股扫描                                    │
-│  └── ML 模型预测                                         │
+│  └── ML 模型预测（当前仅诊断）                            │
 └─────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -84,8 +89,8 @@ python scripts/daily_all.py --mode latest
 # 收盘前自动使用上一交易日（默认阈值 18:00，可按需调整）
 MFTS_AUTO_TARGET_CUTOFF_HOUR=18 python scripts/daily_all.py --mode latest
 
-# 说明：若主数据已覆盖目标日，latest 模式会跳过增量下载（避免冗余补数）
-# 同时仍可执行后续扫描/ML/P1/P2/P3，行业门禁依然生效
+# 说明：若共享 ODS 未覆盖目标日，latest 模式会停止并记录 data_availability 失败
+# 项目不会调用任何旧下载器或向共享数据根写入
 
 # 默认模式：补齐最近缺口（适合隔几天更新）
 python scripts/daily_all.py --mode catchup --catchup-days 10
@@ -132,7 +137,7 @@ python scripts/daily_verify.py --date 20260320 --label-mode open_to_open --label
 ### 3. 共享 ODS 数据可用性
 ```bash
 export ASHARE_DATA_ROOT=/Users/max/Data/ashare-source-data
-python scripts/daily_all.py --mode latest
+conda run -n stock python scripts/daily_all.py --mode latest
 ```
 - 本项目仅读取共享 ODS；不会下载、补数、修复或写入数据。
 - 数据生产与快照维护由外部供应链负责。若 ODS 未覆盖目标交易日，`daily_all.py` 会停止并记录 `data_availability` 失败。

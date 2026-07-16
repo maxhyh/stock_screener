@@ -427,10 +427,10 @@ Do not compare candidates that fill missing dates by shifting the window backwar
 - tags: daily_signal, data_quality, p2, promotion
 - status: active
 - severity: high
-- mitigation: Rolling replay and promotion reference calendars must require signal dates to exist in `data/daily_all_5y.parquet`. Exclude shared or profile daily files whose signal date has no market bars, and record the exclusion as stale/orphan signal handling rather than candidate failure.
-- evidence: `output/daily` had daily files for `20260126`, `20260127`, `20260128`, `20260203`, and `20260205`, while the main market parquet had zero rows for those dates. These files initially made v22 look like it missed main reference dates. After filtering signal dates by market-date membership, v22 passed calendar coverage but still failed clean 60-day P2 smoke on NAV, MDD, and exit-not-tradable parity.
+- mitigation: Rolling replay and promotion reference calendars must require signal dates to exist in the canonical manifest-backed ODS `daily_bars` session set selected for that evidence generation. Exclude signal files without matching ODS bars, persist the snapshot/manifest digest, and record the exclusion as stale/orphan signal handling rather than candidate failure.
+- evidence: Under the retired pre-ODS generation, `output/daily` had files for `20260126`, `20260127`, `20260128`, `20260203`, and `20260205`, while the then-local market parquet had zero rows for those dates. This historical incident established the invariant; the current implementation must enforce it against ODS sessions, not restore the deleted parquet.
 
-Do not use `output/daily` as the market calendar. It can contain old recommendations from dates absent in the current data parquet.
+Do not use `output/daily` as the market calendar. It can contain recommendations from dates absent in the selected ODS generation.
 
 ### 2026-04-29 | P2 ledger nav_pre/nav_post is not always the full daily NAV path
 - tags: p2, attribution, nav_path, evidence_lineage

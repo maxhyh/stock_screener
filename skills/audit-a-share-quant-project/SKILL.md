@@ -1,6 +1,6 @@
 ---
 name: audit-a-share-quant-project
-description: Deep audit, recurring maintenance, performance review, documentation/skill hygiene, and robustness hardening for this specific A-share quant trading repository. Use when Codex needs to inspect or continuously improve this repo's Python strategy, data pipeline, training, backtest, execution, orchestration, documentation, local skills, or project memory for look-ahead bias, A-share trading-rule mismatches, ST or suspension filtering gaps, slippage and tax mistakes, Pandas bottlenecks, risk-control inconsistencies, architecture improvements, duplicate docs/skills, or long-term project health.
+description: Use when auditing or maintaining this A-share quant repository, especially for data/PIT, model, backtest, execution, promotion, documentation, skill, memory, or architecture credibility work.
 ---
 
 # Audit A Share Quant Project
@@ -17,8 +17,8 @@ Audit this repository as an A-share production trading system, not as a generic 
 - Read [references/codex-engineering-discipline.md](references/codex-engineering-discipline.md) before making strategy, execution, promotion, or architecture changes.
 - Read [references/priority-model.md](references/priority-model.md) before ranking findings or choosing the next maintenance target.
 - Read [references/output-template.md](references/output-template.md) when the user wants a full audit report or a recurring maintenance summary.
-- Run `python skills/audit-a-share-quant-project/scripts/find_audit_hotspots.py` from the repo root to surface likely bias, performance, and robustness matches.
-- Run `python skills/audit-a-share-quant-project/scripts/build_maintenance_snapshot.py` from the repo root when you need a recurring status snapshot before or after a maintenance pass.
+- Run `conda run -n stock python skills/audit-a-share-quant-project/scripts/find_audit_hotspots.py` from the repo root to surface likely bias, performance, and robustness matches.
+- Run `conda run -n stock python skills/audit-a-share-quant-project/scripts/build_maintenance_snapshot.py` from the repo root when you need a recurring status snapshot before or after a maintenance pass.
 - For documentation or skill-hygiene tasks, inspect `docs/DOCUMENTATION_AND_SKILLS.md`, `docs/README.md`, `docs/PROJECT_INDEX.md`, `AGENTS.md`, `agent.md`, and this skill's `references/`.
 - When the task is strategy promotion or shadow tracking, also inspect:
   `scripts/quant_p2_rolling_replay.py`
@@ -29,23 +29,29 @@ Audit this repository as an A-share production trading system, not as a generic 
 
 ## Audit Order
 
-1. Inspect the production chain:
+1. Verify the runtime and data-generation contract before interpreting any alpha evidence:
+   Conda environment `stock`, read-only `ASHARE_DATA_ROOT`, ODS manifests,
+   point-in-time metadata, adjusted research prices, raw execution prices, and
+   artifact generation identity.
+2. Inspect the production chain:
+   `core/data/ashare_ods_loader.py`
+   `core/data/market_data_gateway.py`
    `scripts/daily_all.py`
-   `scripts/daily_incremental_update.py`
    `scripts/daily_ml_select.py`
+   `scripts/train_mfts_lgbm.py`
    `core/mfts_screener.py`
    `scripts/quant_portfolio_backtest.py`
    `core/risk/pretrade.py`
    `core/execution/paper_broker.py`
-2. Verify A-share execution assumptions:
+3. Verify A-share execution assumptions:
    T+1,涨跌停, ST, 停牌, 北交所排除, 印花税卖出单边, lot size, next-trade-day alignment.
-3. Verify label and backtest consistency:
+4. Verify label and backtest consistency:
    training label mode, `daily_verify` label mode, portfolio entry and exit timing, P2 and P3 alignment.
-4. Profile Pandas hotspots:
+5. Profile Pandas hotspots:
    row loops, `iterrows`, `apply(axis=1)`, repeated `groupby().transform(lambda x: x.rolling(...))`, full-file parquet loads.
-5. Check robustness:
+6. Check robustness:
    broad exceptions, metadata coverage gates, state leakage, output coupling, weak fallbacks.
-6. For strategy upgrade candidates:
+7. For strategy upgrade candidates:
    compare research strength against P2 shadow evidence and do not recommend promotion if execution-side NAV, ADV blocking, or industry concentration clearly worsen.
 
 ## Maintenance Mode
@@ -79,8 +85,19 @@ Audit this repository as an A-share production trading system, not as a generic 
 - When you discover a recurring repo pattern, encode it here or in `references/` so the next maintenance pass starts with better context.
 - Use maintenance snapshots to compare whether hotspot counts and risk surfaces are shrinking over time.
 - Treat shadow diagnostics as first-class maintenance evidence when the current target is a profile or strategy candidate rather than a core engine bug.
+- Do not create profiles, run P2 promotion evidence, or compare annualized returns while a P0 data-generation, PIT, price-adjustment, label-horizon, or model-lineage issue remains unresolved.
 
 ## What To Look For
+
+### Data And Evidence Lineage
+
+- Use the `stock` Conda environment for project commands. Do not silently fall back to system Python or a stale `.venv`.
+- Treat `/Users/max/Data/ashare-source-data` as read-only. Read canonical datasets from `ods/`; never modify, download into, or repair the shared source tree from this repository.
+- Require manifest-backed snapshot selection and persist dataset, snapshot, manifest digest, loader version, and source mode in derived artifacts.
+- Separate adjusted research/label prices from raw execution prices. Never train return labels on an unadjusted close series.
+- Require point-in-time instrument metadata for historical universe construction. A current or window-end instrument master is not a historical membership source.
+- Use official `pre_close`, upper limit, lower limit, suspension, ST, and board status when available; label heuristics and price ratios are fallback diagnostics, not authoritative execution truth.
+- Reject promotion evidence produced from a different data generation than its signals, model, backtest, or P2 ledger.
 
 ### Logic And Alpha
 
