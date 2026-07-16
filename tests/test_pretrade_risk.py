@@ -150,6 +150,43 @@ def test_pretrade_risk_blocks_style_size_exposure_when_enabled():
     assert stats["style_size_limits_hit"] >= 1
 
 
+def test_pretrade_risk_nav_weighted_style_basis_allows_small_offsetting_entries():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002"],
+            "名称": ["A", "B"],
+            "ML评分": [0.9, 0.8],
+            "排名_num": [1, 2],
+            "target_weight": [0.05, 0.05],
+        }
+    )
+    cfg = PreTradeRiskConfig(
+        enabled=True,
+        capital_base=1_000_000,
+        max_industry_weight=1.0,
+        max_adv_participation=0.50,
+        min_price=0.0,
+        blacklist_codes=set(),
+        max_style_size_exposure_abs=0.20,
+        style_exposure_basis="nav_weighted",
+        style_lb_short=20,
+        style_lb_beta=60,
+    )
+    kept, blocked, stats = apply_pretrade_risk_gates(
+        signal_df=signal_df,
+        bars_idx=_bars_idx_with_style_history(),
+        trade_date=pd.Timestamp("2026-04-09"),
+        total_target_pos=0.10,
+        max_single_pos=0.05,
+        cfg=cfg,
+        industry_map={"000001": "银行", "000002": "医药"},
+    )
+
+    assert len(kept) == 2
+    assert blocked.empty
+    assert stats["style_exposure_basis"] == "nav_weighted"
+
+
 def test_pretrade_risk_reweights_survivors_after_blocked_names():
     signal_df = pd.DataFrame(
         {

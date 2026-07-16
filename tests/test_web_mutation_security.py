@@ -63,18 +63,12 @@ def test_run_scan_uses_core_engine_and_accepts_date(client, monkeypatch):
     assert captured["kwargs"]["cwd"].endswith("stock_screener")
 
 
-def test_download_data_uses_incremental_update(client, monkeypatch):
-    class Dummy:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
+def test_download_data_is_disabled_for_read_only_ods(client, monkeypatch):
+    called = {"run": False}
 
-    called = {}
-
-    def fake_run(cmd, **kwargs):
-        called["cmd"] = cmd
-        called["kwargs"] = kwargs
-        return Dummy()
+    def fake_run(*_args, **_kwargs):
+        called["run"] = True
+        raise AssertionError("read-only ODS route must not invoke a downloader")
 
     monkeypatch.setattr(results_routes.subprocess, "run", fake_run)
 
@@ -83,11 +77,11 @@ def test_download_data_uses_incremental_update(client, monkeypatch):
         json={"date": "20260319"},
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 410
     body = resp.get_json()
-    assert body["success"] is True
-    assert body["command"][1].endswith("scripts/daily_incremental_update.py")
-    assert body["command"][-2:] == ["--target-date", "20260319"]
+    assert body["success"] is False
+    assert "只读" in body["error"]
+    assert called["run"] is False
 
 
 def test_token_required_when_configured(monkeypatch):

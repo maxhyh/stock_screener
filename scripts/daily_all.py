@@ -21,13 +21,12 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
-
 # 项目路径
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from config.settings import resolve_default_label_horizon
+from core.data import AShareMarketDataGateway
 from core.platform import (
     PlatformHealthSnapshot,
     PlatformMonitor,
@@ -39,11 +38,9 @@ from core.platform import (
     write_run_manifest,
 )
 from utils.output_paths import ensure_output_dirs, get_output_dirs, list_dual
-from utils.trade_calendar import nearest_trade_day_on_or_before, previous_trade_day, trade_dates_between
 
 OUTPUT_DIR = Path(BASE_DIR) / "output"
 STATE_FILE = OUTPUT_DIR / "pipeline_state.json"
-DATA_FILE = Path(BASE_DIR) / "data" / "daily_all_5y.parquet"
 
 # Python 解释器：优先环境变量，默认当前解释器
 VENV_PYTHON = os.environ.get("VENV_PYTHON") or sys.executable
@@ -100,44 +97,38 @@ def get_auto_target_date() -> str:
     """自动目标日期（收盘前取上一交易日，周末回退到周五）。"""
     now = datetime.now()
     cutoff_hour = int(os.environ.get("MFTS_AUTO_TARGET_CUTOFF_HOUR", "18"))
-    target_day = now.date()
-    # A股当日数据通常在收盘后再稳定可用，收盘前默认使用上一交易日。
+    target_day = now.date().strftime("%Y-%m-%d")
+    sessions = AShareMarketDataGateway().available_trade_dates(end=target_day)
+    if not sessions:
+        raise RuntimeError("shared ODS has no daily_bars trading sessions on or before today")
     if int(now.hour) < cutoff_hour:
-        target_day = previous_trade_day(target_day, parquet_file=DATA_FILE)
-    else:
-        target_day = nearest_trade_day_on_or_before(target_day, parquet_file=DATA_FILE)
-    return target_day.strftime("%Y%m%d")
+        sessions = [session for session in sessions if session < target_day]
+        if not sessions:
+            raise RuntimeError("shared ODS has no prior daily_bars trading session before the cutoff")
+    return sessions[-1].replace("-", "")
 
 
 def load_latest_data_date() -> str | None:
-    """读取当前主数据最新交易日（YYYYMMDD）。"""
-    if not DATA_FILE.exists():
-        return None
-    df = pd.read_parquet(DATA_FILE, columns=["trade_date"])
-    if df.empty:
-        return None
-    d = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dropna()
-    if d.empty:
-        return None
-    return d.max().strftime("%Y%m%d")
+    """Read the latest read-only ODS daily-bars session (YYYYMMDD)."""
+    sessions = AShareMarketDataGateway().available_trade_dates()
+    return sessions[-1].replace("-", "") if sessions else None
 
 
 def business_dates_between(start_yyyymmdd: str, end_yyyymmdd: str) -> list[str]:
-    """返回 (start, end] 区间的工作日日期（YYYYMMDD）。"""
-    return trade_dates_between(start_yyyymmdd, end_yyyymmdd, parquet_file=DATA_FILE)
+    """Return read-only ODS sessions in the ``(start, end]`` interval."""
+    dates = AShareMarketDataGateway().available_trade_dates(start=start_yyyymmdd, end=end_yyyymmdd)
+    return [date.replace("-", "") for date in dates if date.replace("-", "") > str(start_yyyymmdd)]
 
 
 def load_trade_calendar_info() -> tuple[list[str], dict[str, int]]:
-    """读取交易日与每日覆盖数。"""
-    if not DATA_FILE.exists():
-        return [], {}
-    df = pd.read_parquet(DATA_FILE, columns=["trade_date", "ts_code"])
-    df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), errors="coerce")
-    df = df.dropna(subset=["trade_date"])
-    df["date_str"] = df["trade_date"].dt.strftime("%Y%m%d")
-    dates = sorted(df["date_str"].unique().tolist())
-    counts = df.groupby("date_str")["ts_code"].nunique().to_dict()
-    return dates, counts
+    """Read recent ODS sessions and their daily-bar instrument coverage."""
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    calendar_days = max(30, int(os.environ.get("MFTS_PIPELINE_CALENDAR_DAYS", "450")))
+    sessions = sessions[-calendar_days:]
+    dates = [date.replace("-", "") for date in sessions]
+    counts = gateway.daily_bar_counts(sessions)
+    return dates, {date.replace("-", ""): int(counts.get(date, 0)) for date in sessions}
 
 
 def load_industry_coverage() -> dict[str, object]:
@@ -145,41 +136,33 @@ def load_industry_coverage() -> dict[str, object]:
     读取元数据行业覆盖率。
     返回示例:
     {
-      "file": ".../data/stock_info.csv",
+      "file": "ashare_ods/instrument_master",
       "rows": 5500,
       "industry_nonempty": 4400,
       "coverage_pct": 80.0,
       "ok": True
     }
     """
-    data_dir = Path(BASE_DIR) / "data"
-    candidates = [data_dir / "stock_info.csv", data_dir / "stock_metadata.csv", data_dir / "stock_basic.csv"]
-    for fp in candidates:
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype=str)
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if ind_col is None:
-            continue
-        ind = df[ind_col].where(~df[ind_col].isna(), "").astype(str).str.strip()
-        ind = ind.replace({"nan": "", "None": "", "NONE": ""})
-        nonempty = int((ind != "").sum())
-        rows = int(len(df))
-        cov = float(nonempty / max(rows, 1) * 100.0)
-        return {
-            "file": str(fp),
-            "rows": rows,
-            "industry_nonempty": nonempty,
-            "coverage_pct": cov,
-            "ok": True,
-        }
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if sessions:
+        asof_date = sessions[-1]
+        df = gateway.load_stock_info(asof_date)
+        if not df.empty and "industry" in df.columns:
+            ind = df["industry"].where(~df["industry"].isna(), "").astype(str).str.strip()
+            ind = ind.replace({"nan": "", "None": "", "NONE": ""})
+            nonempty = int((ind != "").sum())
+            rows = int(len(df))
+            return {
+                "file": "ashare_ods/instrument_master",
+                "rows": rows,
+                "industry_nonempty": nonempty,
+                "coverage_pct": float(nonempty / max(rows, 1) * 100.0),
+                "ok": True,
+                "market_data_lineage": dict(df.attrs.get("market_data_lineage", {})),
+            }
     return {
-        "file": "",
+        "file": "ashare_ods/instrument_master",
         "rows": 0,
         "industry_nonempty": 0,
         "coverage_pct": 0.0,
@@ -615,25 +598,25 @@ def main() -> bool:
         "--p3-max-ret-gap-mae-pct",
         type=float,
         default=float(os.environ.get("MFTS_P3_MAX_RET_GAP_MAE_PCT", "2.0")),
-        help="P3 门槛：收益偏差 MAE 上限（%）",
+        help="P3 门槛：收益偏差 MAE 上限（%%）",
     )
     parser.add_argument(
         "--p3-min-match-coverage-pct",
         type=float,
         default=float(os.environ.get("MFTS_P3_MIN_MATCH_COVERAGE_PCT", "60.0")),
-        help="P3 门槛：回测-执行匹配覆盖率下限（%）",
+        help="P3 门槛：回测-执行匹配覆盖率下限（%%）",
     )
     parser.add_argument(
         "--p3-max-order-block-rate-pct",
         type=float,
         default=float(os.environ.get("MFTS_P3_MAX_ORDER_BLOCK_RATE_PCT", "35.0")),
-        help="P3 门槛：订单阻塞率均值上限（%）",
+        help="P3 门槛：订单阻塞率均值上限（%%）",
     )
     parser.add_argument(
         "--p3-max-risk-block-rate-pct",
         type=float,
         default=float(os.environ.get("MFTS_P3_MAX_RISK_BLOCK_RATE_PCT", "35.0")),
-        help="P3 门槛：风控拦截率均值上限（%）",
+        help="P3 门槛：风控拦截率均值上限（%%）",
     )
     parser.add_argument(
         "--p3-min-matched-rows",
@@ -762,10 +745,11 @@ def main() -> bool:
             "with_p1": bool(args.with_p1),
             "with_p2": bool(args.with_p2),
             "with_p3_consistency": bool(args.with_p3_consistency),
+            "market_data_source": "ashare_ods",
+            "market_data_root": str(AShareMarketDataGateway().data_root),
+            "market_data_snapshot_policy": "latest_snapshot_per_trade_date",
         },
         tracked_files={
-            "daily_data": DATA_FILE,
-            "stock_meta": Path(BASE_DIR) / "data" / "stock_info.csv",
             "profile_config": Path(BASE_DIR) / "config" / "quant_live_profiles.json",
         },
         config_fingerprint=build_config_fingerprint(security_cfg),
@@ -810,87 +794,28 @@ def main() -> bool:
     industry_gate_passed = True
     industry_cov_info: dict[str, object] = {}
 
-    # Step 1: 数据更新（verify-only 跳过）
+    # Step 1: 共享 ODS 覆盖检查。该项目只读消费共享数据，绝不下载或写入。
     if args.mode != "verify-only":
         log("=" * 50)
-        log(f"Step {step_no}/{total_steps}: 数据更新")
+        log(f"Step {step_no}/{total_steps}: 共享 ODS 覆盖检查")
         log("=" * 50)
-        incremental_script = os.path.join(BASE_DIR, "scripts", "daily_incremental_update.py")
-        if os.path.exists(incremental_script):
-            if args.mode == "catchup":
-                latest_data_date = load_latest_data_date()
-                auto_target = get_auto_target_date()
-                if latest_data_date is None:
-                    ok = run_script(incremental_script, description="增量数据更新")
-                    run_record["data_targets"] = [auto_target]
-                else:
-                    gap_dates = business_dates_between(latest_data_date, auto_target)
-                    # 仅补齐最近窗口，避免一次追太久
-                    gap_dates = gap_dates[-args.catchup_days:] if args.catchup_days > 0 else gap_dates
-                    if not gap_dates:
-                        log(f"ℹ️ 数据已更新到最新目标日 {auto_target}，跳过")
-                        ok = True
-                        run_record["data_targets"] = []
-                    else:
-                        log(f"ℹ️ 待补数据日期: {', '.join(gap_dates)}")
-                        all_ok = True
-                        failed_targets: list[str] = []
-                        for d in gap_dates:
-                            step_ok = run_script(
-                                incremental_script,
-                                description=f"增量数据更新 {d}",
-                                script_args=["--target-date", d],
-                            )
-                            all_ok = all_ok and step_ok
-                            if not step_ok:
-                                failed_targets.append(d)
-
-                        # catchup 场景允许“前序日失败、后续日成功补齐”：
-                        # 只要最终主数据已追到目标日，即视为数据更新成功。
-                        final_latest = load_latest_data_date()
-                        reached_target = bool(final_latest) and int(final_latest) >= int(auto_target)
-                        if not all_ok and reached_target:
-                            log(
-                                "ℹ️ 数据更新存在中间失败，但最终已追到目标日 "
-                                f"{auto_target}（latest={final_latest}），继续后续步骤"
-                            )
-                            ok = True
-                        else:
-                            ok = all_ok
-
-                        run_record["data_targets"] = gap_dates
-                        if failed_targets:
-                            run_record["data_failed_targets"] = failed_targets
-            elif args.mode == "latest":
-                auto_target = get_auto_target_date()
-                latest_data_date = load_latest_data_date()
-                if latest_data_date and int(latest_data_date) >= int(auto_target):
-                    log(
-                        "ℹ️ 主数据已覆盖目标日，跳过增量更新: "
-                        f"latest={latest_data_date}, target={auto_target}"
-                    )
-                    ok = True
-                    run_record["data_targets"] = []
-                else:
-                    ok = run_script(
-                        incremental_script,
-                        description=f"增量数据更新 {auto_target}",
-                        script_args=["--target-date", auto_target],
-                    )
-                    run_record["data_targets"] = [auto_target]
-            else:
-                ok = run_script(incremental_script, description="增量数据更新")
-                run_record["data_targets"] = []
+        auto_target = get_auto_target_date()
+        latest_data_date = load_latest_data_date()
+        ok = bool(latest_data_date) and int(latest_data_date) >= int(auto_target)
+        run_record["ods_target_date"] = auto_target
+        run_record["ods_latest_trade_date"] = latest_data_date
+        if ok:
+            log(f"ℹ️ 共享 ODS 已覆盖目标日: latest={latest_data_date}, target={auto_target}")
         else:
-            full_script = os.path.join(BASE_DIR, "data", "download_5y_data.py")
-            log("⚠️ 增量脚本不存在，回退全量下载")
-            ok = run_script(full_script, description="全量数据下载")
-            run_record["data_targets"] = []
-        results["data_update"] = ok
-        run_record["steps"]["data_update"] = ok
+            log(
+                "⛔ 共享 ODS 尚未覆盖目标日；本项目只读，不会下载或更新数据: "
+                f"latest={latest_data_date}, target={auto_target}"
+            )
+        results["data_availability"] = ok
+        run_record["steps"]["data_availability"] = ok
         print()
         if not ok:
-            log("⛔ 数据更新失败，停止后续步骤")
+            log("⛔ ODS 覆盖不足，停止后续步骤")
             results.setdefault("mfts_scan", False)
             results.setdefault("ml_select", False)
             results.setdefault("verify", False)
@@ -900,8 +825,8 @@ def main() -> bool:
             return _finish()
         step_no += 1
     else:
-        results["data_update"] = True
-        run_record["steps"]["data_update"] = True
+        results["data_availability"] = True
+        run_record["steps"]["data_availability"] = True
         step_no += 1
 
     trade_dates, trade_counts = load_trade_calendar_info()

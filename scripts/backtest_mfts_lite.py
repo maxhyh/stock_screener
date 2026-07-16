@@ -21,8 +21,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from utils.output_paths import ensure_output_dirs, write_dual_csv
+from core.data.market_data_gateway import AShareMarketDataGateway
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 
@@ -33,13 +33,14 @@ def backtest_lite(days=90):
     print("=" * 70)
     
     # 1. 加载数据 (只加载需要的列)
-    print("\n[1/3] 加载数据...")
-    parquet_file = os.path.join(DATA_DIR, "daily_all_5y.parquet")
-    
-    columns_needed = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 
-                      'vol', 'amount', 'pct_chg']
-    
-    df = pd.read_parquet(parquet_file, columns=columns_needed)
+    print("\n[1/3] 从共享只读 ODS 加载数据...")
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
+        raise RuntimeError("共享 ODS 没有可用日线会话")
+    needed_sessions = max(int(days) + 80, 140)
+    start = sessions[max(0, len(sessions) - needed_sessions)]
+    df = gateway.load_bars(start, sessions[-1], include_bj9=False)
     df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
     
     # 只保留最近 days + 30 天的数据 (30天用于技术指标计算)

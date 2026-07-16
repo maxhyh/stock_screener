@@ -4,7 +4,7 @@ P1 平台化分析：风险暴露 / 收益归因 / 容量与成本诊断。
 
 输入：
 1) 组合回测交易明细（quant_trades_*.csv）
-2) 市场主数据（data/daily_all_5y.parquet，用于流动性容量）
+2) 共享只读 A 股 ODS（用于流动性容量）
 3) 股票元数据（行业映射）
 
 输出（output/risk/）：
@@ -34,10 +34,10 @@ sys.path.insert(0, BASE_DIR)
 
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series
 from utils.output_paths import get_output_dirs, list_dual
+from core.data.market_data_gateway import load_execution_bars
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 
 OUTPUT_DIR = Path(BASE_DIR) / "output"
-DATA_DIR = Path(BASE_DIR) / "data"
-PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
 
 
 def _log(msg: str) -> None:
@@ -103,48 +103,15 @@ def _load_trades(trade_file: Path) -> pd.DataFrame:
     return df.sort_values(["entry_date", "signal_date"]).reset_index(drop=True)
 
 
-def _load_industry_map() -> dict[str, str]:
-    candidates = [
-        DATA_DIR / "stock_info.csv",
-        DATA_DIR / "stock_metadata.csv",
-        DATA_DIR / "stock_basic.csv",
-    ]
-    for fp in candidates:
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype={"ts_code": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if not code_col or not ind_col:
-            continue
-        work = df[[code_col, ind_col]].copy()
-        work["code"] = normalize_ts_code_series(work[code_col])
-        work = work[work["code"] != ""].copy()
-        work["industry"] = work[ind_col].astype(str).fillna("").str.strip()
-        work["industry"] = work["industry"].replace({"nan": "", "None": ""})
-        return dict(zip(work["code"], work["industry"]))
-    return {}
+def _load_industry_map(asof_date: object) -> dict[str, str]:
+    """Load industry metadata from the shared ODS as of the analysis window."""
+    return load_ods_industry_map(asof_date=asof_date)
 
 
-def _load_bars_index() -> pd.DataFrame:
-    if not PARQUET_FILE.exists():
-        return pd.DataFrame()
-    cols = ["ts_code", "trade_date", "open", "vol", "amount"]
-    df = pd.read_parquet(PARQUET_FILE, columns=cols)
-    df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dt.normalize()
-    df["code"] = normalize_ts_code_series(df["ts_code"])
-    for c in ("open", "vol", "amount"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["trade_date", "code"])
-    df = df[df["code"] != ""].copy()
-    if df.empty:
-        return pd.DataFrame()
-    return df.set_index(["trade_date", "code"]).sort_index()
+def _load_bars_index(start: object, end: object) -> pd.DataFrame:
+    """Load only the ODS sessions needed by the realized trade window."""
+    _, bars_idx, _ = load_execution_bars(start, end, lookback_sessions=20, forward_sessions=0)
+    return bars_idx
 
 
 def _get_bar_row(bars_idx: pd.DataFrame, trade_date: pd.Timestamp, code: str) -> pd.Series | None:
@@ -553,8 +520,12 @@ def main() -> int:
         return 1 if args.strict else 0
 
     _log("加载行业映射与成交额数据...")
-    industry_map = _load_industry_map()
-    bars_idx = _load_bars_index()
+    analysis_start = trades_df["entry_date"].min()
+    analysis_end = trades_df["exit_date"].max() if "exit_date" in trades_df.columns else trades_df["entry_date"].max()
+    if pd.isna(analysis_end):
+        analysis_end = trades_df["entry_date"].max()
+    industry_map = _load_industry_map(analysis_end)
+    bars_idx = _load_bars_index(analysis_start, analysis_end)
 
     diag_df, position_df = _build_trade_and_position_frames(
         trades_df=trades_df,
@@ -605,4 +576,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

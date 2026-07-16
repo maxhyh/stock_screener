@@ -27,6 +27,12 @@ class PortfolioConstraints:
     amount_col: str = "amount"
     amount_buffer: float = 1.0
     redistribute_clipped: bool = False
+    reserve_cap: float = 0.0
+    reserve_col: str = "reserve_candidate"
+    exit_trap_risk_col: str = "exit_trap_risk_score"
+    exit_trap_risk_threshold: float = 0.0
+    exit_trap_weight_cap: float = 0.0
+    exit_trap_single_cap: float = 0.0
     impact_model: str = "sqrt"
     impact_base_bps: float = 0.0
     impact_participation_bps: float = 0.0
@@ -83,6 +89,10 @@ def build_portfolio_decision(
     single_cap = min(max(float(constraints.single_cap), 0.0), 1.0)
     industry_cap = min(max(float(constraints.industry_cap), 0.0), 1.0)
     adv_cap = min(max(float(constraints.adv_participation_cap), 0.0), 1.0)
+    reserve_cap = min(max(float(constraints.reserve_cap), 0.0), 1.0)
+    exit_trap_weight_cap = min(max(float(constraints.exit_trap_weight_cap), 0.0), 1.0)
+    exit_trap_single_cap = min(max(float(constraints.exit_trap_single_cap), 0.0), 1.0)
+    exit_trap_threshold = min(max(float(constraints.exit_trap_risk_threshold), 0.0), 1.0)
     capital_base = max(float(constraints.capital_base), 0.0)
     amount_buffer = max(float(constraints.amount_buffer), 0.0)
 
@@ -111,6 +121,26 @@ def build_portfolio_decision(
     amount_vals = df["_amount_for_capacity"].to_numpy(dtype=float)
     raw_vals = df["_raw_target_weight"].to_numpy(dtype=float)
     industry_vals = df[industry_col].astype(str).fillna("__unknown__").replace({"": "__unknown__"}).tolist()
+    reserve_flags = (
+        pd.to_numeric(df[constraints.reserve_col], errors="coerce").fillna(0.0).gt(0).to_numpy(dtype=bool)
+        if constraints.reserve_col in df.columns
+        else np.zeros(n, dtype=bool)
+    )
+    exit_risk_vals = (
+        pd.to_numeric(df[constraints.exit_trap_risk_col], errors="coerce")
+        .fillna(0.0)
+        .clip(0.0, 1.0)
+        .to_numpy(dtype=float)
+        if constraints.exit_trap_risk_col in df.columns
+        else np.zeros(n, dtype=float)
+    )
+    exit_trap_flags = (
+        exit_risk_vals >= exit_trap_threshold
+        if (exit_trap_weight_cap > 0.0 or exit_trap_single_cap > 0.0) and exit_trap_threshold > 0.0
+        else np.zeros(n, dtype=bool)
+    )
+    reserve_weight = 0.0
+    exit_trap_weight = 0.0
 
     for i in range(n):
         desired = max(float(raw_vals[i]), 0.0)
@@ -127,6 +157,10 @@ def build_portfolio_decision(
                 if desired > adv_weight_cap + 1e-12:
                     reasons[i].add("adv_participation_clip")
                 cap = min(cap, adv_weight_cap)
+        if bool(exit_trap_flags[i]) and exit_trap_single_cap > 0.0:
+            if desired > exit_trap_single_cap + 1e-12:
+                reasons[i].add("exit_trap_single_clip")
+            cap = min(cap, exit_trap_single_cap)
         row_caps[i] = max(0.0, cap)
 
     def _industry_room(industry: str) -> float:
@@ -134,21 +168,41 @@ def build_portfolio_decision(
             return 1.0
         return max(industry_cap - float(industry_weight.get(industry, 0.0)), 0.0)
 
+    def _reserve_room(i: int) -> float:
+        if reserve_cap <= 0 or not bool(reserve_flags[i]):
+            return 1.0
+        return max(reserve_cap - float(reserve_weight), 0.0)
+
+    def _exit_trap_room(i: int) -> float:
+        if exit_trap_weight_cap <= 0 or not bool(exit_trap_flags[i]):
+            return 1.0
+        return max(exit_trap_weight_cap - float(exit_trap_weight), 0.0)
+
     for i in range(n):
         desired = max(float(raw_vals[i]), 0.0)
         if desired <= 0:
             continue
         industry = str(industry_vals[i] or "__unknown__")
         room = _industry_room(industry)
-        final = min(desired, float(row_caps[i]), room)
+        reserve_room = _reserve_room(i)
+        exit_trap_room = _exit_trap_room(i)
+        final = min(desired, float(row_caps[i]), room, reserve_room, exit_trap_room)
         if final + 1e-12 < desired and room + 1e-12 < min(desired, float(row_caps[i])):
             reasons[i].add("industry_weight_clip")
+        if reserve_cap > 0 and bool(reserve_flags[i]) and final + 1e-12 < desired:
+            reasons[i].add("reserve_weight_clip")
+        if exit_trap_weight_cap > 0 and bool(exit_trap_flags[i]) and final + 1e-12 < desired:
+            reasons[i].add("exit_trap_weight_clip")
         if min_weight > 0 and final < min_weight:
             reasons[i].add("min_weight")
             final = 0.0
         if final > 1e-12:
             final_weights[i] = final
             industry_weight[industry] = float(industry_weight.get(industry, 0.0)) + float(final)
+            if bool(reserve_flags[i]):
+                reserve_weight += float(final)
+            if bool(exit_trap_flags[i]):
+                exit_trap_weight += float(final)
 
     if redistribute:
         target_sum = min(total_target, float(np.sum(row_caps)))
@@ -160,14 +214,27 @@ def build_portfolio_decision(
             for i in range(n):
                 industry = str(industry_vals[i] or "__unknown__")
                 room = _industry_room(industry)
-                available = max(0.0, min(float(row_caps[i]) - float(final_weights[i]), room))
+                reserve_room = _reserve_room(i)
+                exit_trap_room = _exit_trap_room(i)
+                available = max(
+                    0.0,
+                    min(float(row_caps[i]) - float(final_weights[i]), room, reserve_room, exit_trap_room),
+                )
                 if available <= 1e-12:
+                    if reserve_cap > 0 and bool(reserve_flags[i]) and reserve_room <= 1e-12:
+                        reasons[i].add("reserve_weight_clip")
+                    if exit_trap_weight_cap > 0 and bool(exit_trap_flags[i]) and exit_trap_room <= 1e-12:
+                        reasons[i].add("exit_trap_weight_clip")
                     continue
                 add = min(shortfall, available)
                 if add <= 1e-12:
                     continue
                 final_weights[i] += add
                 industry_weight[industry] = float(industry_weight.get(industry, 0.0)) + float(add)
+                if bool(reserve_flags[i]):
+                    reserve_weight += float(add)
+                if bool(exit_trap_flags[i]):
+                    exit_trap_weight += float(add)
                 reasons[i].add("redistributed_in")
                 shortfall -= add
                 added_total += add
@@ -195,6 +262,7 @@ def build_portfolio_decision(
         rec["unfilled_target_weight"] = float(max(desired - final, 0.0))
         rec["participation_pct"] = float(participation * 100.0)
         rec["impact_cost_bps"] = float(_impact_cost_bps(participation, constraints)) if final > 0 else 0.0
+        rec["exit_trap_flag"] = int(bool(exit_trap_flags[i]))
         rec["constraint_reason"] = reason_text if final > 1e-12 else (reason_text if reason_text != "ok" else "zero_weight")
 
         if final <= 1e-12:
@@ -228,6 +296,31 @@ def build_portfolio_decision(
     exposures = {
         "total_weight": total_weight,
         "capacity_shortfall_weight": capacity_shortfall_weight,
+        "reserve_weight": float(
+            pd.to_numeric(df.get("target_weight", pd.Series(dtype=float)), errors="coerce")
+            .fillna(0.0)
+            .loc[
+                pd.to_numeric(df.get(constraints.reserve_col, pd.Series(0.0, index=df.index)), errors="coerce")
+                .fillna(0.0)
+                .gt(0)
+            ]
+            .sum()
+        )
+        if not df.empty
+        else 0.0,
+        "exit_trap_weight": float(
+            pd.to_numeric(df.get("target_weight", pd.Series(dtype=float)), errors="coerce")
+            .fillna(0.0)
+            .loc[pd.to_numeric(df.get("exit_trap_flag", pd.Series(0, index=df.index)), errors="coerce").fillna(0).gt(0)]
+            .sum()
+        )
+        if not df.empty
+        else 0.0,
+        "exit_trap_count": float(
+            pd.to_numeric(df.get("exit_trap_flag", pd.Series(dtype=float)), errors="coerce").fillna(0).gt(0).sum()
+        )
+        if not df.empty
+        else 0.0,
         "max_single_weight": float(target_weight.max()) if len(target_weight) else 0.0,
         "max_adv_participation_pct": float(participation_pct.max()) if len(participation_pct) else 0.0,
         "estimated_impact_cost_bps": float((target_weight * impact_bps).sum() / max(total_weight, 1e-12)) if total_weight > 0 else 0.0,
@@ -261,6 +354,12 @@ def build_portfolio_decision(
             "amount_col": str(constraints.amount_col),
             "amount_buffer": float(amount_buffer),
             "redistribute_clipped": bool(redistribute),
+            "reserve_cap": float(reserve_cap),
+            "reserve_col": str(constraints.reserve_col),
+            "exit_trap_risk_col": str(constraints.exit_trap_risk_col),
+            "exit_trap_risk_threshold": float(exit_trap_threshold),
+            "exit_trap_weight_cap": float(exit_trap_weight_cap),
+            "exit_trap_single_cap": float(exit_trap_single_cap),
         },
     }
     return PortfolioDecision(selected=df, exposures=exposures, diagnostics=diagnostics)

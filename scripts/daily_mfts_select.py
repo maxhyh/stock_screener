@@ -19,8 +19,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, 'core'))
 
 from mfts_screener import calc_indicators, calculate_alpha_score, load_metadata
+from core.data.market_data_gateway import AShareMarketDataGateway
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 
@@ -37,17 +37,22 @@ def select_stocks_mfts(target_date=None, top_n=30):
     print("=" * 70)
     
     # 1. 加载数据
-    print("\n[1/4] 加载市场数据...")
-    parquet_file = os.path.join(DATA_DIR, "daily_all_5y.parquet")
-    df = pd.read_parquet(parquet_file)
+    print("\n[1/4] 从共享只读 ODS 加载市场数据...")
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
+        raise RuntimeError("共享 ODS 没有可用日线会话")
+    requested_date = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date else sessions[-1]
+    eligible_sessions = [date for date in sessions if date <= requested_date]
+    if not eligible_sessions:
+        raise ValueError(f"目标日期 {requested_date} 前没有 ODS 日线会话")
+    resolved_date = eligible_sessions[-1]
+    df = gateway.load_bars(resolved_date, resolved_date, include_bj9=False, lookback_sessions=252)
     df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
     df['ts_code'] = df['ts_code'].astype(str)
     
     # 确定目标日期
-    if target_date:
-        target_date = pd.to_datetime(target_date)
-    else:
-        target_date = df['trade_date'].max()
+    target_date = pd.to_datetime(resolved_date)
     
     print(f"目标日期: {target_date.date()}")
     
@@ -97,7 +102,7 @@ def select_stocks_mfts(target_date=None, top_n=30):
     top_stocks = valid_df.nlargest(top_n, 'alpha_score').copy()
     
     # 加载元数据
-    meta_dict = load_metadata()
+    meta_dict = load_metadata(target_date)
     top_stocks['name'] = top_stocks['ts_code'].apply(
         lambda x: meta_dict.get(x, {}).get('name', x)
     )

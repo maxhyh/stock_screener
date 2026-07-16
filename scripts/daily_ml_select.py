@@ -25,13 +25,15 @@ sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, 'core'))
 
 from mfts_screener import calc_indicators, load_metadata
+from core.data.market_data_gateway import AShareMarketDataGateway
 from core.risk import PreTradeRiskConfig, apply_pretrade_risk_gates, load_industry_map
 from core.risk.pretrade import _load_blacklist
 from core.platform.portfolio_engine import PortfolioConstraints, build_portfolio_decision
 from config.settings import resolve_default_label_horizon
-from utils.code_utils import normalize_ts_code, normalize_ts_code_series
+from utils.code_utils import limit_ratio_vectorized, normalize_ts_code, normalize_ts_code_series
+from utils.market_data_units import normalize_amount_volume_units
 from utils.market_regime import detect_market_regime
-from utils.metadata_guard import evaluate_metadata_guard, load_metadata_health
+from utils.metadata_guard import evaluate_metadata_guard, load_ods_metadata_health
 from utils.execution_overlay import add_execution_overlay_scores
 from utils.output_paths import ensure_output_dirs, write_dual_csv
 from utils.portfolio_weights import build_score_weights, build_target_weight_checksum
@@ -42,6 +44,9 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 PROFILE_FILE = Path(BASE_DIR) / "config" / "quant_live_profiles.json"
+_MODEL_CACHE: dict[str, object] = {}
+_DATA_CACHE: dict[tuple[object, ...], pd.DataFrame] = {}
+_INDICATOR_DATA_CACHE: dict[tuple[tuple[str, ...], str, str], pd.DataFrame] = {}
 
 
 def load_default_profile_config(profile_file: Path | None = None) -> dict[str, object]:
@@ -87,6 +92,87 @@ def _profile_bool(profile_cfg: dict[str, object] | None, key: str, default: bool
     return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _resolve_score_quantile(profile_cfg: dict[str, object] | None, regime_state: object) -> tuple[float, str]:
+    """Resolve the pre-pretrade ranking-pool quantile while preserving defaults."""
+    defaults = {"正常": 0.60, "震荡": 0.75, "恐慌": 0.85}
+    state = str(regime_state or "").strip()
+    cfg = profile_cfg or {}
+    source = "default_regime_map"
+    q = float(defaults.get(state, 0.50))
+
+    raw_map = cfg.get("score_quantile_map", {})
+    if isinstance(raw_map, dict) and state in raw_map:
+        q = _profile_float(raw_map, state, q)
+        source = f"profile_score_quantile_map:{state}"
+
+    state_key_map = {
+        "正常": "score_quantile_normal",
+        "震荡": "score_quantile_choppy",
+        "恐慌": "score_quantile_panic",
+    }
+    state_key = state_key_map.get(state, "")
+    if state_key and state_key in cfg:
+        q = _profile_float(cfg, state_key, q)
+        source = state_key
+
+    if "score_quantile_q" in cfg:
+        q = _profile_float(cfg, "score_quantile_q", q)
+        source = "score_quantile_q"
+
+    return min(max(float(q), 0.0), 1.0), source
+
+
+def _apply_target_score_blend(
+    work: pd.DataFrame,
+    *,
+    ranking_col: str,
+    profile_cfg: dict[str, object],
+) -> tuple[pd.DataFrame, str, dict[str, object]]:
+    raw = profile_cfg.get("target_score_blend", {})
+    if not isinstance(raw, dict) or not raw:
+        target_score_col = str(profile_cfg.get("target_score_col", ranking_col) or ranking_col).strip()
+        if target_score_col and target_score_col in work.columns:
+            return work, target_score_col, {"enabled": False, "target_score_col": str(target_score_col)}
+        return work, ranking_col, {"enabled": False, "target_score_col": str(ranking_col)}
+
+    weighted: list[tuple[str, float, pd.Series]] = []
+    for col, raw_weight in raw.items():
+        col_name = str(col).strip()
+        weight = _profile_float(raw, col_name, 0.0)
+        if weight <= 0.0 or col_name not in work.columns:
+            continue
+        weighted.append((col_name, float(weight), _norm01_series(work[col_name])))
+    if not weighted:
+        return work, ranking_col, {
+            "enabled": False,
+            "target_score_col": str(ranking_col),
+            "reason": "no_valid_target_score_blend_cols",
+        }
+
+    total = sum(w for _, w, _ in weighted)
+    out = work.copy()
+    blended = pd.Series(0.0, index=out.index, dtype=float)
+    blend_cols: dict[str, float] = {}
+    for col_name, weight, score in weighted:
+        normalized_weight = float(weight / max(total, 1e-12))
+        blended = blended + normalized_weight * score
+        blend_cols[col_name] = normalized_weight
+    out["target_blend_score"] = blended.clip(0.0, 1.0)
+    return out, "target_blend_score", {
+        "enabled": True,
+        "target_score_col": "target_blend_score",
+        "target_score_blend": blend_cols,
+    }
+
+
+def _holiday_gap_reason_override(profile_cfg: dict[str, object] | None, reason: str) -> dict[str, object]:
+    raw = (profile_cfg or {}).get("holiday_gap_reason_overrides", {})
+    if not isinstance(raw, dict):
+        return {}
+    value = raw.get(str(reason), {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _resolve_candidate_pool_n(top_n: int, available_n: int, profile_cfg: dict[str, object] | None) -> int:
     """Return the optimizer/pretrade candidate pool size for reserve replacement."""
     top_n = max(1, int(top_n))
@@ -101,6 +187,99 @@ def _resolve_candidate_pool_n(top_n: int, available_n: int, profile_cfg: dict[st
     if max_n > 0:
         pool_n = min(pool_n, max(top_n, max_n))
     return max(1, min(int(pool_n), available_n))
+
+
+def _build_holiday_gap_guard_info(
+    trade_dates: pd.Series | list[object],
+    signal_date: pd.Timestamp,
+    profile_cfg: dict[str, object] | None,
+    *,
+    total_target: float,
+    single_cap: float,
+) -> dict[str, object]:
+    """Build signal-date-known holiday/long-gap target caps.
+
+    The guard uses only the exchange calendar implied by available trade dates,
+    not future prices or tradability outcomes. It is designed for A-share
+    T+1 risk around long non-trading gaps, where a position entered before a
+    holiday can become an exit trap on the next trading day.
+    """
+    cfg = profile_cfg or {}
+    enabled = _profile_bool(cfg, "holiday_gap_guard_enabled", False)
+    min_gap = max(2, _profile_int(cfg, "holiday_gap_min_calendar_days", 4))
+    total_target = min(max(float(total_target), 0.0), 1.0)
+    single_cap = min(max(float(single_cap), 0.0), 1.0)
+    dates = (
+        pd.Series(trade_dates)
+        .pipe(pd.to_datetime, errors="coerce")
+        .dropna()
+        .dt.normalize()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    signal_ts = pd.Timestamp(signal_date).normalize()
+    next_trade = next((d for d in dates if d > signal_ts), None)
+    post_trade_next = next((d for d in dates if next_trade is not None and d > next_trade), None)
+    signal_trade_gap_days = int((next_trade - signal_ts).days) if next_trade is not None else 0
+    post_trade_gap_days = int((post_trade_next - next_trade).days) if post_trade_next is not None and next_trade is not None else 0
+    max_gap = max(signal_trade_gap_days, post_trade_gap_days)
+    guard = bool(enabled and max_gap >= min_gap)
+    if guard and signal_trade_gap_days >= min_gap and post_trade_gap_days >= min_gap:
+        reason = "signal_to_trade_gap+post_trade_gap"
+    elif guard and signal_trade_gap_days >= min_gap:
+        reason = "signal_to_trade_gap"
+    elif guard and post_trade_gap_days >= min_gap:
+        reason = "post_trade_gap"
+    else:
+        reason = "none"
+    total_cap = min(max(_profile_float(cfg, "holiday_gap_total_position_cap", total_target), 0.0), 1.0)
+    single_cap_limit = min(max(_profile_float(cfg, "holiday_gap_single_pos_cap", single_cap), 0.0), 1.0)
+    reason_override = _holiday_gap_reason_override(cfg, reason) if guard else {}
+    if reason_override:
+        total_cap = min(
+            max(
+                _profile_float(
+                    reason_override,
+                    "total_position_cap",
+                    _profile_float(reason_override, "holiday_gap_total_position_cap", total_cap),
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        single_cap_limit = min(
+            max(
+                _profile_float(
+                    reason_override,
+                    "single_pos_cap",
+                    _profile_float(reason_override, "holiday_gap_single_pos_cap", single_cap_limit),
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+    adjusted_total = min(total_target, total_cap) if guard else total_target
+    adjusted_single = min(single_cap, single_cap_limit) if guard else single_cap
+    scale = float(adjusted_total / max(total_target, 1e-12)) if total_target > 0 else 0.0
+    if not guard:
+        scale = 1.0
+    return {
+        "enabled": bool(enabled),
+        "guard": bool(guard),
+        "reason": reason,
+        "reason_override_applied": bool(reason_override),
+        "min_calendar_gap_days": int(min_gap),
+        "signal_trade_gap_days": int(signal_trade_gap_days),
+        "post_trade_gap_days": int(post_trade_gap_days),
+        "next_trade_date": next_trade.strftime("%Y-%m-%d") if next_trade is not None else "",
+        "post_trade_next_date": post_trade_next.strftime("%Y-%m-%d") if post_trade_next is not None else "",
+        "original_total_target": float(total_target),
+        "adjusted_total_target": float(adjusted_total),
+        "original_single_cap": float(single_cap),
+        "adjusted_single_cap": float(adjusted_single),
+        "target_scale": float(scale),
+    }
 
 
 def _sanitize_profile_slug(raw: object) -> str:
@@ -138,6 +317,234 @@ def _ensure_capacity_amount_columns(work: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _vol_ratio_safety(raw: pd.Series, *, low: float, high: float) -> pd.Series:
+    s = pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    low = max(float(low), 1e-6)
+    high = max(float(high), low + 1e-6)
+    score = pd.Series(1.0, index=s.index, dtype=float)
+    score.loc[s < low] = (s.loc[s < low] / low).clip(0.0, 1.0)
+    score.loc[s > high] = (high / s.loc[s > high]).clip(0.0, 1.0)
+    return score.clip(0.0, 1.0)
+
+
+def _add_tradability_safe_scores(
+    pool: pd.DataFrame,
+    *,
+    profile_cfg: dict[str, object],
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Add signal-date-only tradability safety scores for A-share candidate generation."""
+    if pool is None or pool.empty:
+        return pool, {"enabled": False, "reason": "empty"}
+    out = _ensure_capacity_amount_columns(pool)
+    code_col = "ts_code" if "ts_code" in out.columns else "代码"
+    name_col = "name" if "name" in out.columns else ("名称" if "名称" in out.columns else "")
+    codes = out.get(code_col, pd.Series("", index=out.index)).astype(str)
+    names = out.get(name_col, pd.Series("", index=out.index)).astype(str) if name_col else pd.Series("", index=out.index)
+    limit_ratio = pd.Series(limit_ratio_vectorized(codes, names), index=out.index, dtype=float).clip(lower=0.01)
+    close = pd.to_numeric(out.get("close", out.get("收盘价", np.nan)), errors="coerce")
+    prev_close = pd.to_numeric(out.get("close_1", out.get("prev_close", np.nan)), errors="coerce")
+    high = pd.to_numeric(out.get("high", close), errors="coerce")
+    pct_chg = pd.to_numeric(out.get("pct_chg", out.get("涨跌幅%", 0.0)), errors="coerce").fillna(0.0)
+
+    limit_up = prev_close * (1.0 + limit_ratio)
+    limit_down = prev_close * (1.0 - limit_ratio)
+    valid_limit = close.gt(0) & prev_close.gt(0) & limit_up.gt(0)
+    headroom_pct = pd.Series(0.0, index=out.index, dtype=float)
+    headroom_pct.loc[valid_limit] = ((limit_up.loc[valid_limit] - close.loc[valid_limit]) / close.loc[valid_limit] * 100.0)
+    headroom_pct = headroom_pct.replace([np.inf, -np.inf], 0.0).fillna(0.0).clip(lower=0.0)
+    headroom_floor_pct = max(0.1, _profile_float(profile_cfg, "tradability_limit_headroom_pct", 3.5))
+    limit_headroom_score = (headroom_pct / headroom_floor_pct).clip(0.0, 1.0)
+
+    hot_pct_of_limit = min(max(_profile_float(profile_cfg, "tradability_hot_pct_of_limit", 0.75), 0.1), 1.0)
+    hot_threshold = (limit_ratio * 100.0 * hot_pct_of_limit).clip(lower=0.1)
+    hot_move_score = (1.0 - (pct_chg.clip(lower=0.0) / hot_threshold).clip(0.0, 1.0)).clip(0.0, 1.0)
+
+    max_abs_pct = max(0.1, _profile_float(profile_cfg, "max_abs_pct_chg", 8.0))
+    calm_abs_move_score = (1.0 - (pct_chg.abs() / max_abs_pct).clip(0.0, 1.0)).clip(0.0, 1.0)
+
+    high_touch_buffer = min(max(_profile_float(profile_cfg, "tradability_high_touch_buffer", 0.985), 0.90), 1.01)
+    high_touch_risk = pd.Series(0.0, index=out.index, dtype=float)
+    high_touch_risk.loc[valid_limit] = (high.loc[valid_limit] >= limit_up.loc[valid_limit] * high_touch_buffer).astype(float)
+    high_touch_score = (1.0 - high_touch_risk).clip(0.0, 1.0)
+
+    low = pd.to_numeric(out.get("low", close), errors="coerce")
+    downside_headroom_pct = pd.Series(0.0, index=out.index, dtype=float)
+    valid_down_limit = close.gt(0) & prev_close.gt(0) & limit_down.gt(0)
+    downside_headroom_pct.loc[valid_down_limit] = (
+        (close.loc[valid_down_limit] - limit_down.loc[valid_down_limit])
+        / close.loc[valid_down_limit]
+        * 100.0
+    )
+    downside_headroom_pct = downside_headroom_pct.replace([np.inf, -np.inf], 0.0).fillna(0.0).clip(lower=0.0)
+    exit_headroom_floor_pct = max(0.1, _profile_float(profile_cfg, "exit_trap_downside_headroom_pct", 3.5))
+    exit_headroom_score = (downside_headroom_pct / exit_headroom_floor_pct).clip(0.0, 1.0)
+    exit_hot_pct_of_limit = min(max(_profile_float(profile_cfg, "exit_trap_hot_pct_of_limit", 0.55), 0.1), 1.0)
+    sell_pressure_threshold = (limit_ratio * 100.0 * exit_hot_pct_of_limit).clip(lower=0.1)
+    sell_pressure = (-pct_chg.clip(upper=0.0)).clip(lower=0.0)
+    sell_pressure_score = (1.0 - (sell_pressure / sell_pressure_threshold).clip(0.0, 1.0)).clip(0.0, 1.0)
+    low_touch_buffer = min(max(_profile_float(profile_cfg, "exit_trap_low_touch_buffer", 1.015), 1.0), 1.10)
+    low_touch_risk = pd.Series(0.0, index=out.index, dtype=float)
+    low_touch_risk.loc[valid_down_limit] = (low.loc[valid_down_limit] <= limit_down.loc[valid_down_limit] * low_touch_buffer).astype(float)
+    low_touch_score = (1.0 - low_touch_risk).clip(0.0, 1.0)
+
+    vol_score = _vol_ratio_safety(
+        out.get("vol_ratio", pd.Series(1.0, index=out.index)),
+        low=_profile_float(profile_cfg, "tradability_vol_ratio_low", 0.30),
+        high=_profile_float(profile_cfg, "tradability_vol_ratio_high", 3.0),
+    )
+    vol_ratio_raw = (
+        pd.to_numeric(out.get("vol_ratio", pd.Series(1.0, index=out.index)), errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(1.0)
+    )
+    vol_ratio_low_floor = max(_profile_float(profile_cfg, "tradability_vol_ratio_low", 0.30), 1e-6)
+    vol_ratio_high_floor = max(_profile_float(profile_cfg, "tradability_vol_ratio_high", 3.0), vol_ratio_low_floor + 1e-6)
+    exit_trap_volume_drought_risk = (1.0 - (vol_ratio_raw / vol_ratio_low_floor).clip(0.0, 1.0)).clip(0.0, 1.0)
+    exit_trap_volume_drought_score = (1.0 - exit_trap_volume_drought_risk).clip(0.0, 1.0)
+    exit_trap_volume_surge_risk = ((vol_ratio_raw / vol_ratio_high_floor) - 1.0).clip(0.0, 1.0)
+    exit_trap_volume_surge_score = (1.0 - exit_trap_volume_surge_risk).clip(0.0, 1.0)
+    drawdown_10d_pct = pd.to_numeric(out.get("drawdown_10d_pct", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0).clip(lower=0.0)
+    drawdown_floor_pct = max(0.1, _profile_float(profile_cfg, "exit_trap_drawdown_floor_pct", 12.0))
+    exit_trap_drawdown_risk = (drawdown_10d_pct / drawdown_floor_pct).clip(0.0, 1.0)
+    exit_trap_drawdown_score = (1.0 - exit_trap_drawdown_risk).clip(0.0, 1.0)
+    down_momentum_5d = pd.to_numeric(out.get("down_momentum_5d", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0).clip(lower=0.0)
+    momentum_floor_pct = max(0.1, _profile_float(profile_cfg, "exit_trap_down_momentum_floor_pct", 8.0))
+    exit_trap_momentum_risk = (down_momentum_5d / momentum_floor_pct).clip(0.0, 1.0)
+    exit_trap_momentum_score = (1.0 - exit_trap_momentum_risk).clip(0.0, 1.0)
+    volatility_10d = pd.to_numeric(out.get("volatility_10d", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0).clip(lower=0.0)
+    volatility_floor_pct = max(0.1, _profile_float(profile_cfg, "exit_trap_volatility_floor_pct", 4.0))
+    exit_trap_volatility_risk = (volatility_10d / volatility_floor_pct).clip(0.0, 1.0)
+    exit_trap_volatility_score = (1.0 - exit_trap_volatility_risk).clip(0.0, 1.0)
+    amount_score = _norm01_series(
+        np.log1p(pd.to_numeric(out.get("amount_capacity_conservative", out.get("amount_ma20", 0.0)), errors="coerce").fillna(0.0).clip(lower=0.0))
+    )
+
+    w_headroom = max(0.0, _profile_float(profile_cfg, "tradability_headroom_blend", 0.30))
+    w_hot = max(0.0, _profile_float(profile_cfg, "tradability_hot_blend", 0.25))
+    w_vol = max(0.0, _profile_float(profile_cfg, "tradability_volume_blend", 0.20))
+    w_calm = max(0.0, _profile_float(profile_cfg, "tradability_calm_blend", 0.15))
+    w_amount = max(0.0, _profile_float(profile_cfg, "tradability_amount_blend", 0.10))
+    w_touch = max(0.0, _profile_float(profile_cfg, "tradability_high_touch_blend", 0.20))
+    total = w_headroom + w_hot + w_vol + w_calm + w_amount + w_touch
+    if total <= 1e-12:
+        total = 1.0
+        w_headroom = 1.0
+    tradability_score = (
+        w_headroom * limit_headroom_score
+        + w_hot * hot_move_score
+        + w_vol * vol_score
+        + w_calm * calm_abs_move_score
+        + w_amount * amount_score
+        + w_touch * high_touch_score
+    ) / total
+    out["tradability_safe_score"] = tradability_score.clip(0.0, 1.0)
+    out["tradability_limit_headroom_pct"] = headroom_pct
+    out["tradability_hot_move_score"] = hot_move_score
+    out["tradability_volume_score"] = vol_score
+    out["tradability_high_touch_score"] = high_touch_score
+    out["tradability_entry_risk_score"] = (1.0 - out["tradability_safe_score"]).clip(0.0, 1.0)
+
+    w_exit_headroom = max(0.0, _profile_float(profile_cfg, "exit_trap_headroom_blend", 0.35))
+    w_exit_pressure = max(0.0, _profile_float(profile_cfg, "exit_trap_pressure_blend", 0.25))
+    w_exit_vol = max(0.0, _profile_float(profile_cfg, "exit_trap_volume_blend", 0.15))
+    w_exit_amount = max(0.0, _profile_float(profile_cfg, "exit_trap_amount_blend", 0.10))
+    w_exit_touch = max(0.0, _profile_float(profile_cfg, "exit_trap_low_touch_blend", 0.15))
+    w_exit_calm = max(0.0, _profile_float(profile_cfg, "exit_trap_calm_blend", 0.10))
+    w_exit_vol_drought = max(0.0, _profile_float(profile_cfg, "exit_trap_volume_drought_blend", 0.0))
+    w_exit_vol_surge = max(0.0, _profile_float(profile_cfg, "exit_trap_volume_surge_blend", 0.0))
+    w_exit_drawdown = max(0.0, _profile_float(profile_cfg, "exit_trap_drawdown_blend", 0.0))
+    w_exit_momentum = max(0.0, _profile_float(profile_cfg, "exit_trap_down_momentum_blend", 0.0))
+    w_exit_volatility = max(0.0, _profile_float(profile_cfg, "exit_trap_volatility_blend", 0.0))
+    exit_total = (
+        w_exit_headroom
+        + w_exit_pressure
+        + w_exit_vol
+        + w_exit_amount
+        + w_exit_touch
+        + w_exit_calm
+        + w_exit_vol_drought
+        + w_exit_vol_surge
+        + w_exit_drawdown
+        + w_exit_momentum
+        + w_exit_volatility
+    )
+    if exit_total <= 1e-12:
+        exit_total = 1.0
+        w_exit_headroom = 1.0
+    exit_safe_score = (
+        w_exit_headroom * exit_headroom_score
+        + w_exit_pressure * sell_pressure_score
+        + w_exit_vol * vol_score
+        + w_exit_amount * amount_score
+        + w_exit_touch * low_touch_score
+        + w_exit_calm * calm_abs_move_score
+        + w_exit_vol_drought * exit_trap_volume_drought_score
+        + w_exit_vol_surge * exit_trap_volume_surge_score
+        + w_exit_drawdown * exit_trap_drawdown_score
+        + w_exit_momentum * exit_trap_momentum_score
+        + w_exit_volatility * exit_trap_volatility_score
+    ) / exit_total
+    out["exit_trap_safe_score"] = exit_safe_score.clip(0.0, 1.0)
+    out["exit_trap_risk_score"] = (1.0 - out["exit_trap_safe_score"]).clip(0.0, 1.0)
+    out["exit_trap_downside_headroom_pct"] = downside_headroom_pct
+    out["exit_trap_low_touch_score"] = low_touch_score
+    out["exit_trap_volume_drought_risk"] = exit_trap_volume_drought_risk
+    out["exit_trap_volume_surge_risk"] = exit_trap_volume_surge_risk
+    out["exit_trap_drawdown_10d_pct"] = drawdown_10d_pct
+    out["exit_trap_down_momentum_5d"] = down_momentum_5d
+    out["exit_trap_volatility_10d"] = volatility_10d
+    return out, {
+        "enabled": True,
+        "mean_score": float(pd.to_numeric(out["tradability_safe_score"], errors="coerce").mean()),
+        "low_score_count": int((pd.to_numeric(out["tradability_safe_score"], errors="coerce").fillna(0.0) < 0.35).sum()),
+        "near_limit_count": int((headroom_pct < headroom_floor_pct).sum()),
+        "high_touch_count": int(high_touch_risk.sum()),
+        "headroom_floor_pct": float(headroom_floor_pct),
+        "exit_trap_risk_mean": float(pd.to_numeric(out["exit_trap_risk_score"], errors="coerce").mean()),
+        "exit_trap_high_risk_count": int((pd.to_numeric(out["exit_trap_risk_score"], errors="coerce").fillna(0.0) >= 0.65).sum()),
+        "exit_trap_low_touch_count": int(low_touch_risk.sum()),
+        "exit_trap_headroom_floor_pct": float(exit_headroom_floor_pct),
+        "exit_trap_volume_drought_risk_mean": float(pd.to_numeric(out["exit_trap_volume_drought_risk"], errors="coerce").mean()),
+        "exit_trap_drawdown_10d_mean": float(pd.to_numeric(out["exit_trap_drawdown_10d_pct"], errors="coerce").mean()),
+    }
+
+
+def _apply_tradability_safe_ranking(
+    pool: pd.DataFrame,
+    *,
+    ranking_col: str,
+    profile_cfg: dict[str, object],
+) -> tuple[pd.DataFrame, str, dict[str, object]]:
+    work, info = _add_tradability_safe_scores(pool, profile_cfg=profile_cfg)
+    if work is None or work.empty:
+        return work, ranking_col, info
+    enabled = _profile_bool(profile_cfg, "tradability_safe_ranking_enabled", False)
+    blend = min(max(_profile_float(profile_cfg, "tradability_rank_blend", 0.0), 0.0), 0.8)
+    if not enabled or blend <= 1e-12:
+        work["tradability_adjusted_score"] = pd.to_numeric(work.get(ranking_col, 0.0), errors="coerce").fillna(0.0)
+        info.update({"ranking_enabled": False, "ranking_col": str(ranking_col), "rank_blend": 0.0})
+        return work, ranking_col, info
+    rank_score = _norm01_series(work.get(ranking_col, pd.Series(0.0, index=work.index)))
+    safe_score = pd.to_numeric(work["tradability_safe_score"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    exit_blend = (
+        min(max(_profile_float(profile_cfg, "exit_trap_rank_blend", 0.0), 0.0), 0.8)
+        if _profile_bool(profile_cfg, "exit_trap_ranking_enabled", False)
+        else 0.0
+    )
+    exit_safe = pd.to_numeric(work.get("exit_trap_safe_score", 0.5), errors="coerce").fillna(0.5).clip(0.0, 1.0)
+    combined_safe = ((1.0 - exit_blend) * safe_score + exit_blend * exit_safe).clip(0.0, 1.0)
+    work["tradability_adjusted_score"] = ((1.0 - blend) * rank_score + blend * combined_safe).clip(0.0, 1.0)
+    info.update(
+        {
+            "ranking_enabled": True,
+            "ranking_col": "tradability_adjusted_score",
+            "rank_blend": float(blend),
+            "exit_trap_rank_blend": float(exit_blend),
+        }
+    )
+    return work, "tradability_adjusted_score", info
+
+
 def _prepare_capacity_safe_reserve_pool(
     pool: pd.DataFrame,
     *,
@@ -173,6 +580,16 @@ def _prepare_capacity_safe_reserve_pool(
     adv_score = _norm01_series(work.get("adv_capacity_score", amount_score))
     liquidity_score = _norm01_series(work.get("liquidity_score", amount_score))
     industry_score = _norm01_series(work.get("industry_balance_score", 0.5))
+    tradability_score = _norm01_series(
+        work["tradability_safe_score"]
+        if "tradability_safe_score" in work.columns
+        else pd.Series(0.5, index=work.index, dtype=float)
+    )
+    exit_trap_score = _norm01_series(
+        work["exit_trap_safe_score"]
+        if "exit_trap_safe_score" in work.columns
+        else pd.Series(0.5, index=work.index, dtype=float)
+    )
     quality_score = _norm01_series(work.get("signal_quality", rank_score))
     abs_pct = pd.to_numeric(work.get("pct_chg", 0.0), errors="coerce").fillna(0.0).abs()
     calm_score = 1.0 - _norm01_series(abs_pct)
@@ -183,7 +600,22 @@ def _prepare_capacity_safe_reserve_pool(
     industry_blend = min(max(_profile_float(profile_cfg, "reserve_industry_blend", 0.10), 0.0), 1.0)
     calm_blend = min(max(_profile_float(profile_cfg, "reserve_calm_blend", 0.05), 0.0), 1.0)
     quality_blend = min(max(_profile_float(profile_cfg, "reserve_quality_blend", 0.0), 0.0), 1.0)
-    raw_total = capacity_blend + rank_blend + liquidity_blend + industry_blend + calm_blend + quality_blend
+    tradability_blend = min(max(_profile_float(profile_cfg, "reserve_tradability_blend", 0.0), 0.0), 1.0)
+    exit_trap_blend = min(max(_profile_float(profile_cfg, "reserve_exit_trap_blend", 0.0), 0.0), 1.0)
+    if _profile_bool(profile_cfg, "tradability_safe_reserve_enabled", False) and tradability_blend <= 1e-12:
+        tradability_blend = 0.15
+    if _profile_bool(profile_cfg, "exit_trap_safe_reserve_enabled", False) and exit_trap_blend <= 1e-12:
+        exit_trap_blend = 0.15
+    raw_total = (
+        capacity_blend
+        + rank_blend
+        + liquidity_blend
+        + industry_blend
+        + calm_blend
+        + quality_blend
+        + tradability_blend
+        + exit_trap_blend
+    )
     if raw_total <= 1e-12:
         raw_total = 1.0
         capacity_blend = 1.0
@@ -196,12 +628,103 @@ def _prepare_capacity_safe_reserve_pool(
         + industry_blend * industry_score
         + calm_blend * calm_score
         + quality_blend * quality_score
+        + tradability_blend * tradability_score
+        + exit_trap_blend * exit_trap_score
     ) / raw_total
     safe_score = safe_score.clip(0.0, 1.0)
 
     work["_original_rank_score"] = rank_score
     work["reserve_capacity_score"] = capacity_score
     work["reserve_safe_score"] = safe_score
+    primary_rank_mode = str(
+        profile_cfg.get("capacity_safe_primary_rank_mode", "reserve_only") or "reserve_only"
+    ).strip().lower()
+    primary_rank_blend = min(max(_profile_float(profile_cfg, "capacity_safe_primary_rank_blend", 0.0), 0.0), 1.0)
+    if primary_rank_mode in {"target_score_topn", "score_topn"}:
+        work, label_score_col, label_score_info = _apply_target_score_blend(
+            work,
+            ranking_col=ranking_col,
+            profile_cfg=profile_cfg,
+        )
+        explicit_label_col = str(profile_cfg.get("capacity_safe_primary_label_score_col", "") or "").strip()
+        if explicit_label_col and explicit_label_col in work.columns:
+            label_score_col = explicit_label_col
+        if label_score_col not in work.columns:
+            label_score_col = ranking_col
+        work[label_score_col] = pd.to_numeric(work[label_score_col], errors="coerce").fillna(0.0)
+        out = work.sort_values(label_score_col, ascending=False).reset_index(drop=True)
+        out["reserve_candidate"] = (np.arange(len(out)) >= primary_n).astype(int)
+        out["portfolio_rank_score"] = 1.0 + _norm01_series(out[label_score_col])
+        reserves = out[out["reserve_candidate"].astype(int).eq(1)]
+        return out, "portfolio_rank_score", {
+            "enabled": True,
+            "primary_top_n": int(primary_n),
+            "amount_col": str(amount_col),
+            "reserve_rows": int(len(reserves)),
+            "reserve_safe_score_mean": float(
+                pd.to_numeric(reserves.get("reserve_safe_score", pd.Series(dtype=float)), errors="coerce").mean()
+            )
+            if not reserves.empty
+            else 0.0,
+            "reserve_tradability_blend": float(tradability_blend),
+            "reserve_exit_trap_blend": float(exit_trap_blend),
+            "reserve_tradability_score_mean": float(
+                pd.to_numeric(reserves.get("tradability_safe_score", pd.Series(dtype=float)), errors="coerce").mean()
+            )
+            if (not reserves.empty and "tradability_safe_score" in reserves.columns)
+            else 0.0,
+            "reserve_exit_trap_safe_score_mean": float(
+                pd.to_numeric(reserves.get("exit_trap_safe_score", pd.Series(dtype=float)), errors="coerce").mean()
+            )
+            if (not reserves.empty and "exit_trap_safe_score" in reserves.columns)
+            else 0.0,
+            "primary_rank_mode": primary_rank_mode,
+            "primary_rank_blend": float(primary_rank_blend),
+            "primary_label_score_col": str(label_score_col),
+            "primary_label_score_info": label_score_info,
+        }
+    if primary_rank_mode in {"blend_full_pool", "full_pool_blend", "safe_full_pool"} and primary_rank_blend > 0.0:
+        work["capacity_safe_primary_score"] = (
+            (1.0 - primary_rank_blend) * rank_score + primary_rank_blend * safe_score
+        ).clip(0.0, 1.0)
+        work = work.sort_values(ranking_col, ascending=False).reset_index(drop=True)
+        work["reserve_candidate"] = (np.arange(len(work)) >= primary_n).astype(int)
+        out = work.sort_values("capacity_safe_primary_score", ascending=False).reset_index(drop=True)
+        out["portfolio_rank_score"] = 1.0 + pd.to_numeric(
+            out["capacity_safe_primary_score"], errors="coerce"
+        ).fillna(0.0)
+        return out, "portfolio_rank_score", {
+            "enabled": True,
+            "primary_top_n": int(primary_n),
+            "amount_col": str(amount_col),
+            "reserve_rows": int(len(out[out["reserve_candidate"].astype(int).eq(1)])),
+            "reserve_safe_score_mean": float(
+                pd.to_numeric(
+                    out.loc[out["reserve_candidate"].astype(int).eq(1), "reserve_safe_score"],
+                    errors="coerce",
+                ).mean()
+            ),
+            "reserve_tradability_blend": float(tradability_blend),
+            "reserve_exit_trap_blend": float(exit_trap_blend),
+            "reserve_tradability_score_mean": float(
+                pd.to_numeric(
+                    out.loc[out["reserve_candidate"].astype(int).eq(1), "tradability_safe_score"],
+                    errors="coerce",
+                ).mean()
+            )
+            if "tradability_safe_score" in out.columns
+            else 0.0,
+            "reserve_exit_trap_safe_score_mean": float(
+                pd.to_numeric(
+                    out.loc[out["reserve_candidate"].astype(int).eq(1), "exit_trap_safe_score"],
+                    errors="coerce",
+                ).mean()
+            )
+            if "exit_trap_safe_score" in out.columns
+            else 0.0,
+            "primary_rank_mode": primary_rank_mode,
+            "primary_rank_blend": float(primary_rank_blend),
+        }
     work = work.sort_values(ranking_col, ascending=False).reset_index(drop=True)
     work["reserve_candidate"] = (np.arange(len(work)) >= primary_n).astype(int)
     primary = work.iloc[:primary_n].copy()
@@ -216,6 +739,12 @@ def _prepare_capacity_safe_reserve_pool(
         "amount_col": str(amount_col),
         "reserve_rows": int(len(reserve)),
         "reserve_safe_score_mean": float(pd.to_numeric(reserve.get("reserve_safe_score", pd.Series(dtype=float)), errors="coerce").mean()) if not reserve.empty else 0.0,
+        "reserve_tradability_blend": float(tradability_blend),
+        "reserve_exit_trap_blend": float(exit_trap_blend),
+        "reserve_tradability_score_mean": float(pd.to_numeric(reserve.get("tradability_safe_score", pd.Series(dtype=float)), errors="coerce").mean()) if not reserve.empty else 0.0,
+        "reserve_exit_trap_safe_score_mean": float(pd.to_numeric(reserve.get("exit_trap_safe_score", pd.Series(dtype=float)), errors="coerce").mean()) if not reserve.empty else 0.0,
+        "primary_rank_mode": primary_rank_mode,
+        "primary_rank_blend": float(primary_rank_blend),
     }
 
 
@@ -231,9 +760,24 @@ def load_latest_model():
     
     latest_model = os.path.join(MODEL_DIR, model_files[-1])
     print(f"加载模型: {latest_model}")
+
+    cache_enabled = _parse_bool_like(os.environ.get("MFTS_DAILY_SELECT_CACHE_MODEL", "true"), default=True)
+    cache_key = os.path.abspath(latest_model)
+    if cache_enabled and cache_key in _MODEL_CACHE:
+        model_pkg = _MODEL_CACHE[cache_key]
+        model_info = {
+            'label_mode': model_pkg.get('label_mode', 'unknown'),
+            'label_horizon': model_pkg.get('label_horizon', None),
+            'execution_hint': model_pkg.get('execution_hint', ''),
+            'timestamp': model_pkg.get('timestamp', ''),
+        }
+        return model_pkg['model'], model_pkg['feature_cols'], model_info
     
     with open(latest_model, 'rb') as f:
         model_pkg = pickle.load(f)
+    if cache_enabled:
+        _MODEL_CACHE.clear()
+        _MODEL_CACHE[cache_key] = model_pkg
     
     model_info = {
         'label_mode': model_pkg.get('label_mode', 'unknown'),
@@ -250,56 +794,99 @@ def load_latest_data(
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
 ):
-    """加载市场数据，支持列裁剪与日期窗口过滤。"""
-    parquet_file = os.path.join(DATA_DIR, "daily_all_5y.parquet")
-    
-    if not os.path.exists(parquet_file):
-        raise FileNotFoundError(f"数据文件不存在: {parquet_file}")
-    
-    print(f"读取数据文件: {parquet_file}")
+    """Load a column/date slice from the canonical read-only ODS gateway."""
     read_cols = None
     if columns:
         read_cols = sorted(set(["ts_code", "trade_date"]) | set(columns))
+    gateway = AShareMarketDataGateway()
+    if start_date is None or end_date is None:
+        available_dates = gateway.available_trade_dates()
+        if not available_dates:
+            raise RuntimeError("共享 ODS daily_bars 没有可用交易日")
+    else:
+        available_dates = []
+    start_ts = pd.Timestamp(start_date).normalize() if start_date is not None else pd.Timestamp(available_dates[0])
+    end_ts = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp(available_dates[-1])
+    if end_ts < start_ts:
+        raise ValueError(f"end_date {end_ts.date()} is before start_date {start_ts.date()}")
+    cache_enabled = _parse_bool_like(os.environ.get("MFTS_DAILY_SELECT_CACHE_DATA", "false"), default=False)
+    cache_key = (
+        tuple(read_cols or ["__all__"]),
+        start_ts.strftime("%Y%m%d"),
+        end_ts.strftime("%Y%m%d"),
+    )
+    if cache_enabled:
+        if cache_key not in _DATA_CACHE:
+            _DATA_CACHE[cache_key] = gateway.load_bars(start_ts, end_ts, include_bj9=False)
+        df = _DATA_CACHE[cache_key].copy()
+    else:
+        df = gateway.load_bars(start_ts, end_ts, include_bj9=False)
+    lineage = dict(df.attrs.get("market_data_lineage", {}))
 
-    df = None
-    filters_to_try: list[list[tuple[str, str, object]]] = [[]]
-    if start_date is not None or end_date is not None:
-        start_ts = pd.Timestamp(start_date).normalize() if start_date is not None else None
-        end_ts = pd.Timestamp(end_date).normalize() if end_date is not None else None
-        next_day = end_ts + pd.Timedelta(days=1) if end_ts is not None else None
-
-        int_filters: list[tuple[str, str, object]] = []
-        str_filters: list[tuple[str, str, object]] = []
-        if start_ts is not None:
-            int_filters.append(("trade_date", ">=", int(start_ts.strftime("%Y%m%d"))))
-            str_filters.append(("trade_date", ">=", start_ts.strftime("%Y%m%d")))
-        if next_day is not None:
-            int_filters.append(("trade_date", "<", int(next_day.strftime("%Y%m%d"))))
-            str_filters.append(("trade_date", "<", next_day.strftime("%Y%m%d")))
-        filters_to_try = [int_filters, str_filters]
-
-    for filters in filters_to_try:
-        try:
-            kwargs = {"columns": read_cols}
-            if filters:
-                kwargs["filters"] = filters
-            df = pd.read_parquet(parquet_file, **kwargs)
-            break
-        except Exception:
-            df = None
-
-    if df is None:
-        df = pd.read_parquet(parquet_file, columns=read_cols)
-
-    df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
+    df['trade_date'] = pd.to_datetime(df['trade_date'], errors="coerce")
     df['ts_code'] = normalize_ts_code_series(df['ts_code'])
     df = df[df['ts_code'] != ''].copy()
-    if start_date is not None:
-        df = df[df['trade_date'] >= pd.Timestamp(start_date).normalize()].copy()
-    if end_date is not None:
-        df = df[df['trade_date'] <= pd.Timestamp(end_date).normalize()].copy()
-    
+    df = df[(df['trade_date'] >= start_ts) & (df['trade_date'] <= end_ts)].copy()
+    if read_cols:
+        missing = [column for column in read_cols if column not in df.columns]
+        if missing:
+            raise RuntimeError(f"共享 ODS 行情缺少请求列: {','.join(missing)}")
+        df = df.loc[:, read_cols].copy()
+    df.attrs["market_data_lineage"] = lineage
     return df
+
+
+def _add_selection_window_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out['vol_ratio'] = out['vol'] / out['vol_ma20']
+    out['rolling_high_10'] = out.groupby('ts_code', observed=True, sort=False)['close'].transform(
+        lambda s: s.rolling(10, min_periods=3).max()
+    )
+    out['drawdown_10d_pct'] = (
+        (1.0 - out['close'] / out['rolling_high_10'].replace(0, np.nan)).clip(lower=0.0) * 100.0
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    out['volatility_10d'] = out.groupby('ts_code', observed=True, sort=False)['pct_chg'].transform(
+        lambda s: pd.to_numeric(s, errors='coerce').rolling(10, min_periods=5).std()
+    ).fillna(0.0)
+    out['down_momentum_5d'] = (
+        -(out['close'] / out['close_5'].replace(0, np.nan) - 1.0).clip(upper=0.0) * 100.0
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
+    return out
+
+
+def _load_cached_indicator_window(
+    *,
+    columns: list[str],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    cache_start = pd.to_datetime(
+        os.environ.get("MFTS_DAILY_SELECT_CACHE_START") or start_date,
+        errors="coerce",
+    )
+    cache_end = pd.to_datetime(
+        os.environ.get("MFTS_DAILY_SELECT_CACHE_END") or end_date,
+        errors="coerce",
+    )
+    if pd.isna(cache_start):
+        cache_start = pd.Timestamp(start_date)
+    if pd.isna(cache_end):
+        cache_end = pd.Timestamp(end_date)
+    cache_start = pd.Timestamp(cache_start).normalize()
+    cache_end = pd.Timestamp(cache_end).normalize()
+    cache_key = (tuple(sorted(set(["open", "high", "low", "close", "vol", "amount", "pct_chg", *columns]))), cache_start.strftime("%Y%m%d"), cache_end.strftime("%Y%m%d"))
+    if cache_key not in _INDICATOR_DATA_CACHE:
+        raw = load_latest_data(columns=list(cache_key[0]), start_date=cache_start, end_date=cache_end)
+        raw = raw.sort_values(['ts_code', 'trade_date'])
+        enriched = calc_indicators(raw)
+        enriched = _add_selection_window_columns(enriched)
+        _INDICATOR_DATA_CACHE.clear()
+        _INDICATOR_DATA_CACHE[cache_key] = enriched
+    cached = _INDICATOR_DATA_CACHE[cache_key]
+    mask = (cached["trade_date"] >= pd.Timestamp(start_date).normalize()) & (
+        cached["trade_date"] <= pd.Timestamp(end_date).normalize()
+    )
+    return cached.loc[mask].copy()
 
 
 def _parse_bool_like(v: object, default: bool = False) -> bool:
@@ -313,6 +900,133 @@ def _parse_bool_like(v: object, default: bool = False) -> bool:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return bool(default)
+
+
+def _research_stage_snapshots_enabled(profile_cfg: dict[str, object] | None) -> bool:
+    raw = os.environ.get("MFTS_WRITE_RESEARCH_STAGE_SNAPSHOTS", "")
+    if raw.strip():
+        return _parse_bool_like(raw, default=False)
+    return _profile_bool(profile_cfg, "write_research_stage_snapshots", False)
+
+
+def _append_research_stage_snapshot(
+    frames: list[pd.DataFrame],
+    df: pd.DataFrame | None,
+    *,
+    stage: str,
+    target_date: pd.Timestamp,
+    ranking_col: str,
+    extra: dict[str, object] | None = None,
+) -> None:
+    if df is None or df.empty:
+        return
+    out = df.copy()
+    out["research_stage"] = str(stage)
+    out["stage_ranking_col"] = str(ranking_col)
+    out["日期"] = pd.Timestamp(target_date).strftime("%Y-%m-%d")
+    out["代码"] = normalize_ts_code_series(out.get("ts_code", out.get("代码", "")))
+    out = out[out["代码"] != ""].copy()
+    if out.empty:
+        return
+    if ranking_col in out.columns:
+        score = pd.to_numeric(out[ranking_col], errors="coerce")
+        out["stage_rank"] = score.rank(method="first", ascending=False, na_option="bottom").astype(int)
+    else:
+        out["stage_rank"] = np.arange(1, len(out) + 1)
+    out["排名"] = out["stage_rank"]
+    alias_map = {
+        "ML评分": "ml_score",
+        "质量分": "signal_quality",
+        "综合分": "hybrid_score",
+        "稳定分": "stability_score",
+        "重构分": "refactor_score",
+        "流动性分": "liquidity_score",
+        "ADV容量分": "adv_capacity_score",
+        "行业均衡分": "industry_balance_score",
+        "成交额MA20": "amount_ma20",
+        "收盘价": "close",
+        "涨跌幅%": "pct_chg",
+    }
+    for alias, source in alias_map.items():
+        if alias not in out.columns and source in out.columns:
+            out[alias] = out[source]
+    if "名称" not in out.columns and "name" in out.columns:
+        out["名称"] = out["name"]
+    if "行业" not in out.columns and "industry" in out.columns:
+        out["行业"] = out["industry"]
+    for key, value in (extra or {}).items():
+        out[str(key)] = value
+    preferred = [
+        "日期",
+        "research_stage",
+        "stage_rank",
+        "stage_ranking_col",
+        "排名",
+        "代码",
+        "名称",
+        "行业",
+        "收盘价",
+        "涨跌幅%",
+        "ML评分",
+        "质量分",
+        "综合分",
+        "稳定分",
+        "重构分",
+        "流动性分",
+        "ADV容量分",
+        "行业均衡分",
+        "成交额MA20",
+        "portfolio_rank_score",
+        "target_blend_score",
+        "reserve_safe_score",
+        "reserve_capacity_score",
+        "tradability_safe_score",
+        "exit_trap_safe_score",
+        "exit_trap_risk_score",
+        "hard_limit_flag",
+        "overheat_flag",
+        "vol_anomaly_flag",
+        "vol_anomaly_low_flag",
+        "vol_anomaly_high_flag",
+        "target_weight",
+        "target_weight_raw",
+        "participation_pct",
+        "impact_cost_bps",
+        "unfilled_target_weight",
+        "constraint_reason",
+        "reserve_candidate",
+        "signal_risk_blocked",
+        "signal_risk_reason",
+        "stage_pool_n",
+        "stage_note",
+    ]
+    cols = [c for c in preferred if c in out.columns]
+    cols += [c for c in out.columns if c not in cols and not str(c).startswith("_")]
+    frames.append(out.loc[:, cols].sort_values("stage_rank").reset_index(drop=True))
+
+
+def _write_research_stage_snapshots(
+    frames: list[pd.DataFrame],
+    *,
+    base_dir: Path,
+    output_profile: str,
+    date_str: str,
+) -> tuple[str, str]:
+    if not frames:
+        return "", ""
+    out = pd.concat(frames, ignore_index=True)
+    if out.empty:
+        return "", ""
+    if output_profile:
+        stage_dir = base_dir / "research_stage_profiles" / output_profile
+    else:
+        stage_dir = base_dir / "research_stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    dated = stage_dir / f"research_stages_{date_str}.csv"
+    latest = stage_dir / "research_stages_latest.csv"
+    out.to_csv(dated, index=False, encoding="utf-8-sig")
+    out.to_csv(latest, index=False, encoding="utf-8-sig")
+    return str(dated), str(latest)
 
 
 def _parse_percent_text(text: object, fallback: float) -> float:
@@ -447,6 +1161,13 @@ def _build_signal_pretrade_cfg_from_env(profile_cfg: dict[str, object] | None = 
     profile_cfg = dict(profile_cfg or {})
     default_adv = _profile_float(profile_cfg, "risk_max_adv_participation", 0.05)
     default_industry_weight = min(max(_profile_float(profile_cfg, "risk_max_industry_weight", 0.35), 0.05), 1.0)
+    default_style_size = max(0.0, _profile_float(profile_cfg, "risk_max_style_size_exposure_abs", 0.0))
+    default_style_beta = max(0.0, _profile_float(profile_cfg, "risk_max_style_beta_exposure_abs", 0.0))
+    default_style_momentum = max(0.0, _profile_float(profile_cfg, "risk_max_style_momentum_exposure_abs", 0.0))
+    default_style_vol = max(0.0, _profile_float(profile_cfg, "risk_max_style_vol_exposure_abs", 0.0))
+    default_style_basis = str(profile_cfg.get("risk_style_exposure_basis", "invested_weighted") or "invested_weighted")
+    default_style_lb_short = max(5, _profile_int(profile_cfg, "risk_style_lb_short", 20))
+    default_style_lb_beta = max(10, _profile_int(profile_cfg, "risk_style_lb_beta", 60))
     default_min_price = max(
         0.0,
         _profile_float(
@@ -470,12 +1191,34 @@ def _build_signal_pretrade_cfg_from_env(profile_cfg: dict[str, object] | None = 
             0.0,
             _safe_float(os.environ.get("MFTS_RISK_MIN_PRICE", str(default_min_price)), default_min_price),
         ),
-        max_style_size_exposure_abs=max(0.0, _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_SIZE_EXPOSURE_ABS", "0.0"), 0.0)),
-        max_style_beta_exposure_abs=max(0.0, _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_BETA_EXPOSURE_ABS", "0.0"), 0.0)),
-        max_style_momentum_exposure_abs=max(0.0, _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_MOMENTUM_EXPOSURE_ABS", "0.0"), 0.0)),
-        max_style_vol_exposure_abs=max(0.0, _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_VOL_EXPOSURE_ABS", "0.0"), 0.0)),
-        style_lb_short=max(5, int(_safe_float(os.environ.get("MFTS_RISK_STYLE_LB_SHORT", "20"), 20.0))),
-        style_lb_beta=max(10, int(_safe_float(os.environ.get("MFTS_RISK_STYLE_LB_BETA", "60"), 60.0))),
+        max_style_size_exposure_abs=max(
+            0.0,
+            _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_SIZE_EXPOSURE_ABS", str(default_style_size)), default_style_size),
+        ),
+        max_style_beta_exposure_abs=max(
+            0.0,
+            _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_BETA_EXPOSURE_ABS", str(default_style_beta)), default_style_beta),
+        ),
+        max_style_momentum_exposure_abs=max(
+            0.0,
+            _safe_float(
+                os.environ.get("MFTS_RISK_MAX_STYLE_MOMENTUM_EXPOSURE_ABS", str(default_style_momentum)),
+                default_style_momentum,
+            ),
+        ),
+        max_style_vol_exposure_abs=max(
+            0.0,
+            _safe_float(os.environ.get("MFTS_RISK_MAX_STYLE_VOL_EXPOSURE_ABS", str(default_style_vol)), default_style_vol),
+        ),
+        style_exposure_basis=str(os.environ.get("MFTS_RISK_STYLE_EXPOSURE_BASIS", default_style_basis) or default_style_basis),
+        style_lb_short=max(
+            5,
+            int(_safe_float(os.environ.get("MFTS_RISK_STYLE_LB_SHORT", str(default_style_lb_short)), default_style_lb_short)),
+        ),
+        style_lb_beta=max(
+            10,
+            int(_safe_float(os.environ.get("MFTS_RISK_STYLE_LB_BETA", str(default_style_lb_beta)), default_style_lb_beta)),
+        ),
         blacklist_codes=_load_blacklist(os.environ.get("MFTS_RISK_BLACKLIST_FILE", "")),
     )
 
@@ -740,6 +1483,11 @@ def _assign_target_weights(
     if top_stocks is None or top_stocks.empty:
         return top_stocks, {"mode": "empty", "selected_count": 0}
     work = top_stocks.copy()
+    work, ranking_col, target_score_info = _apply_target_score_blend(
+        work,
+        ranking_col=ranking_col,
+        profile_cfg=profile_cfg,
+    )
     optimizer_mode = str(profile_cfg.get("optimizer_mode", "score_weight") or "score_weight").strip().lower()
     capacity_on = optimizer_mode in {"capacity_aware", "capacity_crowding", "capacity_crowding_aware"}
     industry_cap = _profile_float(profile_cfg, "target_max_industry_weight", 0.0)
@@ -790,6 +1538,12 @@ def _assign_target_weights(
             amount_buffer=amount_buffer,
             redistribute_clipped=str(profile_cfg.get("redistribute_clipped_weight", False)).strip().lower()
             in {"1", "true", "yes", "y", "on"},
+            reserve_cap=min(max(_profile_float(profile_cfg, "target_max_reserve_weight", 0.0), 0.0), 1.0),
+            reserve_col="reserve_candidate",
+            exit_trap_risk_col="exit_trap_risk_score",
+            exit_trap_risk_threshold=min(max(_profile_float(profile_cfg, "target_exit_trap_risk_threshold", 0.0), 0.0), 1.0),
+            exit_trap_weight_cap=min(max(_profile_float(profile_cfg, "target_max_exit_trap_weight", 0.0), 0.0), 1.0),
+            exit_trap_single_cap=min(max(_profile_float(profile_cfg, "target_max_exit_trap_single_weight", 0.0), 0.0), 1.0),
             impact_model=str(profile_cfg.get("impact_model", "sqrt") or "sqrt"),
             impact_base_bps=max(0.0, _profile_float(profile_cfg, "impact_base_bps", 0.0)),
             impact_participation_bps=max(0.0, _profile_float(profile_cfg, "impact_participation_bps", 0.0)),
@@ -798,6 +1552,33 @@ def _assign_target_weights(
     )
     selected = decision.selected.copy()
     if selected.empty:
+        if capacity_on:
+            empty = work.iloc[0:0].copy()
+            for col, default in {
+                "target_weight": 0.0,
+                "target_weight_raw": 0.0,
+                "participation_pct": 0.0,
+                "impact_cost_bps": 0.0,
+                "unfilled_target_weight": 0.0,
+                "industry_weight_post": 0.0,
+                "constraint_reason": "optimizer_empty",
+                "reserve_candidate": 0,
+                "exit_trap_flag": 0,
+            }.items():
+                if col not in empty.columns:
+                    empty[col] = default
+            return empty, {
+                "mode": optimizer_mode,
+                "target_score_col": str(ranking_col),
+                "target_score_blend": target_score_info,
+                "selected_count": 0,
+                "primary_top_n": int(primary_top_n or len(work)),
+                "candidate_pool_n": int(len(work)),
+                "fallback": False,
+                "optimizer_empty": True,
+                "exposures": decision.exposures,
+                "diagnostics": decision.diagnostics,
+            }
         fallback = work.copy()
         weights = np.asarray(
             build_score_weights(
@@ -817,6 +1598,8 @@ def _assign_target_weights(
         fallback["reserve_candidate"] = 0
         return fallback, {
             "mode": optimizer_mode,
+            "target_score_col": str(ranking_col),
+            "target_score_blend": target_score_info,
             "selected_count": int(len(fallback)),
             "primary_top_n": int(primary_top_n or len(work)),
             "candidate_pool_n": int(len(work)),
@@ -837,6 +1620,8 @@ def _assign_target_weights(
         selected["reserve_candidate"] = 0
     return selected, {
         "mode": optimizer_mode,
+        "target_score_col": str(ranking_col),
+        "target_score_blend": target_score_info,
         "selected_count": int(len(selected)),
         "primary_top_n": int(primary_top_n or len(work)),
         "candidate_pool_n": int(len(work)),
@@ -853,6 +1638,8 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     profile_cfg = dict(profile_cfg or load_default_profile_config())
     if top_n is None:
         top_n = int(profile_cfg.get("top_n", 30))
+    research_stage_frames: list[pd.DataFrame] = []
+    write_research_stages = _research_stage_snapshots_enabled(profile_cfg)
 
     print("=" * 70)
     print("MFTS ML每日选股 (内存优化版)")
@@ -907,11 +1694,19 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         f">>> 内存优化: 按目标日期切片 {lookback_days} 天回看 "
         f"(窗口: {start_date.date()} ~ {end_date.date()})..."
     )
-    df = load_latest_data(
-        columns=["open", "high", "low", "close", "vol", "amount", "pct_chg"],
-        start_date=start_date,
-        end_date=end_date,
+    data_columns = ["open", "high", "low", "close", "vol", "amount", "pct_chg"]
+    use_indicator_cache = _parse_bool_like(
+        os.environ.get("MFTS_DAILY_SELECT_PRECOMPUTE_INDICATORS", "false"),
+        default=False,
     )
+    if use_indicator_cache:
+        df = _load_cached_indicator_window(columns=data_columns, start_date=start_date, end_date=end_date)
+    else:
+        df = load_latest_data(
+            columns=data_columns,
+            start_date=start_date,
+            end_date=end_date,
+        )
     print(f"截取后行数: {len(df)}")
     bars_window_df = df[
         [c for c in ("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount") if c in df.columns]
@@ -921,14 +1716,13 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     
     # 2. 计算指标
     print("\n[2/5] 计算技术指标...")
-    df = df.sort_values(['ts_code', 'trade_date'])
-    df = calc_indicators(df)
-    
+    if not use_indicator_cache:
+        df = df.sort_values(['ts_code', 'trade_date'])
+        df = calc_indicators(df)
+        df = _add_selection_window_columns(df)
+
     # 再次清理NaN (指标计算产生的前段NaN)
     df = df.dropna(subset=['ma120', 'vol_ma20', 'z_score'])
-    
-    # 添加辅助列
-    df['vol_ratio'] = df['vol'] / df['vol_ma20']
     
     # 4. 筛选目标日期数据
     today_df = df[df['trade_date'] == target_date].copy()
@@ -1015,7 +1809,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         today_df["feature_redundancy"] = 0.0
         ranking_col = "hybrid_score"
 
-    industry_map = load_industry_map(DATA_DIR)
+    industry_map = load_industry_map(asof_date=target_date)
     today_df["ts_code"] = normalize_ts_code_series(today_df["ts_code"])
     today_df["industry"] = today_df["ts_code"].map(industry_map).fillna("").astype(str).str.strip()
     today_df["industry"] = today_df["industry"].replace({"nan": "", "None": ""})
@@ -1034,9 +1828,8 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     )
     if liquidity_blend > 0 or adv_penalty_blend > 0 or industry_crowding_blend > 0:
         ranking_col = "execution_score"
-
     # 5.1 可交易性过滤（实盘增强）
-    meta_dict = load_metadata()
+    meta_dict = load_metadata(target_date)
     name_map = {normalize_ts_code(k): v.get('name', '') for k, v in meta_dict.items()}
     today_df['name'] = today_df['ts_code'].astype(str).map(name_map).fillna('')
     is_st = today_df['name'].astype(str).str.contains('ST', case=False, na=False)
@@ -1052,7 +1845,28 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     # 强过滤：涨停触及、过热、量能异常
     hard_limit = (today_df['high'] >= limit_up_price * 0.995) | (today_df['pct_chg'] >= (limit_ratio * 100 * 0.95))
     overheat = (today_df['rsi'] > 85) | (today_df['bias'] > 30)
-    vol_anomaly = (today_df['vol_ratio'] < 0.15) | (today_df['vol_ratio'] > 5.0)
+    vol_ratio_for_filter = (
+        pd.to_numeric(today_df.get("vol_ratio", pd.Series(1.0, index=today_df.index)), errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(1.0)
+    )
+    vol_anomaly_low = vol_ratio_for_filter < _profile_float(profile_cfg, "hard_filter_vol_ratio_low", 0.15)
+    vol_anomaly_high = vol_ratio_for_filter > _profile_float(profile_cfg, "hard_filter_vol_ratio_high", 5.0)
+    vol_anomaly = vol_anomaly_low | vol_anomaly_high
+    today_df["hard_limit_flag"] = hard_limit.astype(int)
+    today_df["overheat_flag"] = overheat.astype(int)
+    today_df["vol_anomaly_flag"] = vol_anomaly.astype(int)
+    today_df["vol_anomaly_low_flag"] = vol_anomaly_low.astype(int)
+    today_df["vol_anomaly_high_flag"] = vol_anomaly_high.astype(int)
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            today_df,
+            stage="raw_scored_post_indicator",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={"stage_note": "post_indicator_scored_before_tradability_filters", "stage_pool_n": int(len(today_df))},
+        )
 
     tradable_mask = (~hard_limit) & (~overheat) & (~vol_anomaly)
     filtered_df = today_df[tradable_mask].copy()
@@ -1072,6 +1886,15 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
             f"{target_date.date()} 可交易候选仅 {len(filtered_df)} 只，低于目标 {regime_top_n}，拒绝出榜。"
             "请检查当日覆盖、涨跌停触发和量能过滤条件。"
         )
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            filtered_df,
+            stage="tradability_filter_pool",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={"stage_note": fallback_stage, "stage_pool_n": int(len(filtered_df))},
+        )
 
     profile_min_price = max(0.0, _profile_float(profile_cfg, "min_price", 0.0))
     profile_min_amount_ma20 = max(0.0, _profile_float(profile_cfg, "min_amount_ma20", 0.0))
@@ -1087,6 +1910,15 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
             liquidity_stage = "liquidity_gate_on"
         else:
             liquidity_stage = "liquidity_gate_fallback"
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            filtered_df,
+            stage="liquidity_filter_pool",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={"stage_note": liquidity_stage, "stage_pool_n": int(len(filtered_df))},
+        )
 
     quality_floor_env = os.environ.get("MFTS_SIGNAL_QUALITY_FLOOR", "")
     profile_quality_floor = float(profile_cfg.get("min_signal_quality", 0.40))
@@ -1117,13 +1949,42 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
             quality_stage = f"{quality_stage}+refactor_gate_on"
         else:
             quality_stage = f"{quality_stage}+refactor_gate_fallback"
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            filtered_df,
+            stage="quality_filter_pool",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={"stage_note": quality_stage, "stage_pool_n": int(len(filtered_df))},
+        )
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            filtered_df,
+            stage="filtered_signal_pool",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={"stage_note": f"{fallback_stage}+{liquidity_stage}+{quality_stage}", "stage_pool_n": int(len(filtered_df))},
+        )
 
     # 市场状态下的分位数门槛（先收缩，再兜底回原过滤池）
-    score_quantile_map = {'正常': 0.60, '震荡': 0.75, '恐慌': 0.85}
-    q = score_quantile_map.get(regime['state'], 0.50)
+    q, q_source = _resolve_score_quantile(profile_cfg, regime.get("state", ""))
     score_floor = float(filtered_df[ranking_col].quantile(q))
     gated_df = filtered_df[filtered_df[ranking_col] >= score_floor].copy()
     ranking_pool = gated_df if len(gated_df) >= regime_top_n else filtered_df
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            ranking_pool,
+            stage="ranking_pool_pre_pretrade",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={
+                "stage_note": f"score_quantile_q={q:.2f};source={q_source}",
+                "stage_pool_n": int(len(ranking_pool)),
+            },
+        )
 
     # 5.2 前置风控联动（与 P2 同口径参数）
     ranking_pool, signal_risk_block_df, signal_risk_info = _apply_signal_pretrade_gate(
@@ -1138,7 +1999,24 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         industry_map=industry_map,
         data_dir=DATA_DIR,
     )
-    
+    ranking_pool, ranking_col, tradability_rank_info = _apply_tradability_safe_ranking(
+        ranking_pool,
+        ranking_col=ranking_col,
+        profile_cfg=profile_cfg,
+    )
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            ranking_pool,
+            stage="ranking_pool_post_pretrade",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=ranking_col,
+            extra={
+                "stage_note": str(signal_risk_info.get("stage", "pretrade_unknown")),
+                "stage_pool_n": int(len(ranking_pool)),
+            },
+        )
+
     # 6. 排序并选择Top N；v8 reserve pool 会把扩展候选交给组合层，由组合层在 clip 后递补。
     optimizer_pool_n = _resolve_candidate_pool_n(int(regime_top_n), int(len(ranking_pool)), profile_cfg)
     print(f"\n[5/5] 选择Top {regime_top_n}目标股票 (optimizer_pool={optimizer_pool_n})...")
@@ -1149,8 +2027,29 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         primary_top_n=int(regime_top_n),
         profile_cfg=profile_cfg,
     )
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            top_stocks,
+            stage="optimizer_ranked_pool",
+            target_date=pd.Timestamp(target_date),
+            ranking_col=weight_ranking_col,
+            extra={
+                "stage_note": str(reserve_rank_info.get("primary_rank_mode", "reserve_only")),
+                "stage_pool_n": int(len(top_stocks)),
+            },
+        )
     target_total_for_weights = _resolve_profile_total_position(regime.get("position_range", "60%-80%"), profile_cfg, 0.60)
     target_single_for_weights = min(max(_parse_percent_text(regime.get("single_stock_max", "10%"), 0.10), 0.0), 1.0)
+    holiday_gap_info = _build_holiday_gap_guard_info(
+        trade_dates_df["trade_date"],
+        pd.Timestamp(target_date).normalize(),
+        profile_cfg,
+        total_target=target_total_for_weights,
+        single_cap=target_single_for_weights,
+    )
+    target_total_for_weights = float(holiday_gap_info.get("adjusted_total_target", target_total_for_weights))
+    target_single_for_weights = float(holiday_gap_info.get("adjusted_single_cap", target_single_for_weights))
     top_stocks, optimizer_info = _assign_target_weights(
         top_stocks=top_stocks,
         ranking_col=weight_ranking_col,
@@ -1159,6 +2058,15 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         profile_cfg=profile_cfg,
         primary_top_n=int(regime_top_n),
     )
+    if write_research_stages:
+        _append_research_stage_snapshot(
+            research_stage_frames,
+            top_stocks,
+            stage="final_target_weight",
+            target_date=pd.Timestamp(target_date),
+            ranking_col="target_weight" if "target_weight" in top_stocks.columns else weight_ranking_col,
+            extra={"stage_note": str(optimizer_info.get("mode", "")), "stage_pool_n": int(len(top_stocks))},
+        )
     eval_trade_date = pd.to_datetime(signal_risk_info.get("trade_date", target_date), errors="coerce")
     if pd.isna(eval_trade_date):
         eval_trade_date = pd.Timestamp(target_date).normalize()
@@ -1168,7 +2076,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         bars_window_df=bars_window_df,
         trade_date=pd.Timestamp(eval_trade_date).normalize(),
         total_target_pos=target_total_for_weights,
-        max_single_pos=min(max(_parse_percent_text(regime.get("single_stock_max", "10%"), 0.10), 0.0), 1.0),
+        max_single_pos=target_single_for_weights,
         profile_cfg=profile_cfg,
         industry_map=industry_map,
     )
@@ -1181,19 +2089,44 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     )
     
     # 整理输出
-    result = top_stocks[[
+    result_cols = [
         'ts_code', 'name', 'close', 'pct_chg', 'ml_score', 'signal_quality', 'hybrid_score', 'stability_score', 'refactor_score',
         'liquidity_score', 'adv_capacity_score', 'industry_balance_score', 'amount_ma20', 'bias', 'z_score', 'rsi', 'vol_ratio',
-        'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
+        'portfolio_rank_score', 'target_blend_score', 'reserve_safe_score', 'reserve_capacity_score', 'tradability_safe_score',
+        'tradability_entry_risk_score', 'tradability_limit_headroom_pct',
+        'exit_trap_safe_score', 'exit_trap_risk_score', 'exit_trap_downside_headroom_pct',
+        'exit_trap_volume_drought_risk', 'exit_trap_drawdown_10d_pct', 'exit_trap_down_momentum_5d',
+        'exit_trap_volatility_10d',
         'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
-        'industry_weight_post', 'constraint_reason', 'reserve_candidate'
-    ]].copy()
+        'industry_weight_post', 'constraint_reason', 'reserve_candidate', 'exit_trap_flag'
+    ]
+    text_defaults = {"ts_code": "", "name": "", "constraint_reason": ""}
+    for col in result_cols:
+        if col not in top_stocks.columns:
+            top_stocks[col] = text_defaults.get(col, 0.0)
+    result = top_stocks[result_cols].copy()
+    result["holiday_gap_guard"] = int(bool(holiday_gap_info.get("guard", False)))
+    result["holiday_gap_reason"] = str(holiday_gap_info.get("reason", "none"))
+    result["holiday_gap_signal_trade_gap_days"] = int(holiday_gap_info.get("signal_trade_gap_days", 0))
+    result["holiday_gap_post_trade_gap_days"] = int(holiday_gap_info.get("post_trade_gap_days", 0))
+    result["holiday_gap_target_scale"] = float(holiday_gap_info.get("target_scale", 1.0))
+    result["holiday_gap_total_position_cap"] = float(holiday_gap_info.get("adjusted_total_target", target_total_for_weights))
+    result["holiday_gap_single_pos_cap"] = float(holiday_gap_info.get("adjusted_single_cap", target_single_for_weights))
+    result["holiday_gap_reason_override_applied"] = int(bool(holiday_gap_info.get("reason_override_applied", False)))
     
     result.columns = ['代码', '名称', '收盘价', '涨跌幅%', 'ML评分', '质量分', '综合分', '稳定分', '重构分',
                       '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'BIAS-20', 'Z-Score', 'RSI', '量比',
-                      'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
+                      'portfolio_rank_score', 'target_blend_score', 'reserve_safe_score', 'reserve_capacity_score', 'tradability_safe_score',
+                      'tradability_entry_risk_score', 'tradability_limit_headroom_pct',
+                      'exit_trap_safe_score', 'exit_trap_risk_score', 'exit_trap_downside_headroom_pct',
+                      'exit_trap_volume_drought_risk', 'exit_trap_drawdown_10d_pct', 'exit_trap_down_momentum_5d',
+                      'exit_trap_volatility_10d',
                       'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
-                      'industry_weight_post', 'constraint_reason', 'reserve_candidate']
+                      'industry_weight_post', 'constraint_reason', 'reserve_candidate', 'exit_trap_flag',
+                      'holiday_gap_guard', 'holiday_gap_reason', 'holiday_gap_signal_trade_gap_days',
+                      'holiday_gap_post_trade_gap_days', 'holiday_gap_target_scale',
+                      'holiday_gap_total_position_cap', 'holiday_gap_single_pos_cap',
+                      'holiday_gap_reason_override_applied']
     result['代码'] = result['代码'].astype(str).str.zfill(6)
     
     result['日期'] = target_date.strftime('%Y-%m-%d')
@@ -1222,7 +2155,15 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
                      '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20', 'target_weight', 'target_weight_raw',
                      'participation_pct', 'impact_cost_bps', 'unfilled_target_weight', 'industry_weight_post',
                      'constraint_reason', 'reserve_candidate', 'portfolio_rank_score', 'reserve_safe_score',
-                     'reserve_capacity_score', 'target_weight_source', 'target_weight_checksum',
+                     'reserve_capacity_score', 'tradability_safe_score', 'tradability_entry_risk_score',
+                     'tradability_limit_headroom_pct', 'exit_trap_safe_score', 'exit_trap_risk_score',
+                     'exit_trap_downside_headroom_pct', 'exit_trap_volume_drought_risk',
+                     'exit_trap_drawdown_10d_pct', 'exit_trap_down_momentum_5d', 'exit_trap_volatility_10d',
+                     'holiday_gap_guard', 'holiday_gap_reason', 'holiday_gap_signal_trade_gap_days',
+                     'holiday_gap_post_trade_gap_days', 'holiday_gap_target_scale',
+                     'holiday_gap_total_position_cap', 'holiday_gap_single_pos_cap',
+                     'holiday_gap_reason_override_applied',
+                     'exit_trap_flag', 'target_weight_source', 'target_weight_checksum',
                      'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']]
     
     # Display metrics can be rounded for readability, but execution weights need
@@ -1230,6 +2171,12 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     float_cols = ['收盘价', 'ML评分', '质量分', '综合分', '稳定分', '重构分', '流动性分', 'ADV容量分', '行业均衡分', '成交额MA20',
                   'target_weight', 'target_weight_raw', 'participation_pct', 'impact_cost_bps', 'unfilled_target_weight',
                   'industry_weight_post', 'portfolio_rank_score', 'reserve_safe_score', 'reserve_capacity_score',
+                  'tradability_safe_score', 'tradability_entry_risk_score', 'tradability_limit_headroom_pct',
+                  'exit_trap_safe_score', 'exit_trap_risk_score', 'exit_trap_downside_headroom_pct',
+                  'exit_trap_volume_drought_risk', 'exit_trap_drawdown_10d_pct', 'exit_trap_down_momentum_5d',
+                  'exit_trap_volatility_10d', 'holiday_gap_guard', 'holiday_gap_signal_trade_gap_days',
+                  'holiday_gap_post_trade_gap_days', 'holiday_gap_target_scale', 'holiday_gap_total_position_cap',
+                  'holiday_gap_single_pos_cap', 'holiday_gap_reason_override_applied', 'exit_trap_flag',
                   'BIAS-20', 'Z-Score', 'RSI', '量比', '涨跌幅%']
     weight_cols = {"target_weight", "target_weight_raw", "participation_pct", "unfilled_target_weight", "industry_weight_post"}
     score_cols = {
@@ -1243,6 +2190,11 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "portfolio_rank_score",
         "reserve_safe_score",
         "reserve_capacity_score",
+        "tradability_safe_score",
+        "tradability_entry_risk_score",
+        "exit_trap_safe_score",
+        "exit_trap_risk_score",
+        "exit_trap_volume_drought_risk",
     }
     for col in float_cols:
         decimals = 6 if col in weight_cols else (4 if col in score_cols else 2)
@@ -1264,6 +2216,12 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         risk_dir = base_dir / "risk"
         legacy_file = base_dir / f"daily_{date_str}.csv"
     output_file = daily_dir / f"daily_{date_str}.csv"
+    research_stage_file, research_stage_latest_file = _write_research_stage_snapshots(
+        research_stage_frames,
+        base_dir=base_dir,
+        output_profile=str(output_profile),
+        date_str=date_str,
+    )
     write_dual_csv(result, output_file, legacy_file, index=False, encoding='utf-8-sig')
     risk_dir.mkdir(parents=True, exist_ok=True)
     risk_file = risk_dir / f"signal_pretrade_gates_{date_str}.csv"
@@ -1277,6 +2235,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "regime_top_n": int(regime_top_n),
         "ranking_col": str(ranking_col),
         "score_quantile_q": float(q),
+        "score_quantile_source": str(q_source),
         "score_floor": float(score_floor),
         "raw_candidates": int(len(today_df)),
         "tradable_filtered": int(len(filtered_df)),
@@ -1285,6 +2244,7 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "optimizer_primary_top_n": int(regime_top_n),
         "reserve_candidate_count": int(max(0, _profile_int(profile_cfg, "reserve_candidate_count", 0))),
         "capacity_safe_reserve": dict(reserve_rank_info),
+        "tradability_safe_ranking": dict(tradability_rank_info),
         "liquidity_stage": str(liquidity_stage),
         "liquidity_blend": float(liquidity_blend),
         "adv_penalty_blend": float(adv_penalty_blend),
@@ -1294,7 +2254,14 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         "pretrade": dict(signal_risk_info),
         "topn_pretrade_eval": dict(topn_pretrade_eval),
         "optimizer": dict(optimizer_info),
+        "holiday_gap_guard": dict(holiday_gap_info),
         "target_weight_checksum": str(target_weight_checksum),
+        "research_stage_snapshot": {
+            "enabled": bool(write_research_stages),
+            "file": str(research_stage_file),
+            "latest_file": str(research_stage_latest_file),
+            "stage_count": int(len(research_stage_frames)),
+        },
     }
     summary_file = risk_dir / f"signal_pretrade_summary_{date_str}.json"
     summary_latest_file = risk_dir / "signal_pretrade_summary_latest.json"
@@ -1335,6 +2302,13 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
         f"| unknown_industry_hit={int(topn_pretrade_eval.get('unknown_industry_limits_hit', 0))} "
         f"| top_reason={topn_pretrade_eval.get('top_reason', 'none')}:{int(topn_pretrade_eval.get('top_reason_count', 0))}"
     )
+    print(
+        f"节假日/长间隔保护: guard={int(bool(holiday_gap_info.get('guard', False)))} "
+        f"| reason={holiday_gap_info.get('reason', 'none')} "
+        f"| signal_gap={int(holiday_gap_info.get('signal_trade_gap_days', 0))}d "
+        f"| post_trade_gap={int(holiday_gap_info.get('post_trade_gap_days', 0))}d "
+        f"| target_scale={float(holiday_gap_info.get('target_scale', 1.0)):.2f}"
+    )
 
     print("\n" + "=" * 70)
     print(f"Top {regime_top_n} 目标股票 / reserve 后实际 {len(result)} 只")
@@ -1344,6 +2318,8 @@ def select_stocks(target_date=None, top_n=None, profile_cfg: dict[str, object] |
     print(f"\n✅ 结果已保存: {output_file} (兼容写入: {legacy_file})")
     print(f"✅ 前置风控拦截明细: {risk_file} (latest: {risk_latest_file})")
     print(f"✅ 前置风控汇总: {summary_file} (latest: {summary_latest_file})")
+    if research_stage_file:
+        print(f"✅ 研究阶段候选池快照: {research_stage_file} (latest: {research_stage_latest_file})")
     
     return result
 
@@ -1377,7 +2353,11 @@ def main():
     profile_cfg = load_default_profile_config()
     
     if not bool(args.disable_industry_coverage_gate):
-        metadata_health = load_metadata_health(DATA_DIR)
+        metadata_asof = args.date
+        if not metadata_asof:
+            sessions = AShareMarketDataGateway().available_trade_dates()
+            metadata_asof = sessions[-1] if sessions else ""
+        metadata_health = load_ods_metadata_health(metadata_asof)
         metadata_gate = evaluate_metadata_guard(
             metadata_health,
             min_coverage_pct=float(args.min_industry_coverage_pct),
@@ -1385,25 +2365,30 @@ def main():
         )
         if not bool(metadata_gate.get("passed", False)):
             print(
-                "⛔ 元数据门禁未通过: "
+                "⛔ ODS 元数据门禁未通过: "
                 f"reason={metadata_gate.get('reason', '')} "
                 f"| coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
                 f"| min={float(metadata_gate.get('min_coverage_pct', 0.0)):.2f}% "
-                f"| age_days={float(metadata_gate.get('age_days', 0.0)):.2f} "
-                f"| max_age_days={float(metadata_gate.get('max_age_days', 0.0)):.2f} "
                 f"| file={metadata_gate.get('file', '')}"
             )
             sys.exit(1)
         print(
-            "✅ 元数据门禁通过: "
+            "✅ ODS 元数据门禁通过: "
             f"coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
-            f"| age_days={float(metadata_gate.get('age_days', 0.0)):.2f} "
             f"| file={metadata_gate.get('file', '')}"
         )
 
     try:
         result = select_stocks(target_date=args.date, top_n=args.top, profile_cfg=profile_cfg)
         if result is None or len(result) == 0:
+            raw_allow_empty = os.environ.get("MFTS_ALLOW_EMPTY_DAILY_OUTPUT")
+            allow_empty_output = _parse_bool_like(
+                raw_allow_empty,
+                default=bool(str(args.output_profile or "").strip()),
+            )
+            if allow_empty_output:
+                print("\n⚠️ 选股为空：已保留空 daily 输出作为 no-entry / optimizer_empty evidence")
+                return
             print("\n❌ 选股失败：无有效结果")
             sys.exit(2)
         print("\n✅ 选股完成!")

@@ -35,8 +35,8 @@ def _stub_metrics() -> dict[str, float]:
 def _allow_metadata_gate(monkeypatch):
     monkeypatch.setattr(
         qpb,
-        "load_metadata_health",
-        lambda _data_dir: {"ok": True, "coverage_pct": 100.0, "age_days": 0.0, "file": "mock.csv"},
+        "load_ods_metadata_health",
+        lambda _asof_date: {"ok": True, "coverage_pct": 100.0, "age_days": 0.0, "file": "mock.csv"},
     )
     monkeypatch.setattr(
         qpb,
@@ -49,6 +49,59 @@ def _allow_metadata_gate(monkeypatch):
             "max_age_days": 3.0,
         },
     )
+
+
+def test_backtest_market_loader_uses_shared_ods_execution_contract(monkeypatch):
+    source = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2026-04-01", "2026-04-02"]),
+            "code": ["000001", "000001"],
+            "open": [10.0, 10.2],
+            "high": [10.1, 10.3],
+            "low": [9.9, 10.1],
+            "close": [10.0, 10.2],
+            "vol": [100.0, 110.0],
+            "amount": [1_000_000.0, 1_100_000.0],
+            "prev_close": [9.8, 10.0],
+            "amount_ma20": [0.0, 1_050_000.0],
+            "amount_min5": [1_000_000.0, 1_000_000.0],
+            "amount_min10": [1_000_000.0, 1_000_000.0],
+        }
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_load_execution_bars(start, end, *, lookback_sessions, forward_sessions, include_bj9):
+        calls.append(
+            {
+                "start": str(start),
+                "end": str(end),
+                "lookback_sessions": lookback_sessions,
+                "forward_sessions": forward_sessions,
+                "include_bj9": include_bj9,
+            }
+        )
+        return source.copy(), source.set_index(["trade_date", "code"]), {"data_source": "ashare_ods"}
+
+    monkeypatch.setattr(qpb, "load_execution_bars", fake_load_execution_bars, raising=False)
+
+    market, bars_idx = qpb._load_market_open_prices(
+        "2026-04-01",
+        "2026-04-02",
+        holding_days=8,
+        include_bj9=False,
+    )
+
+    assert calls == [
+        {
+            "start": "2026-04-01",
+            "end": "2026-04-02",
+            "lookback_sessions": 60,
+            "forward_sessions": 8,
+            "include_bj9": False,
+        }
+    ]
+    assert market.attrs["market_data_lineage"]["data_source"] == "ashare_ods"
+    assert list(bars_idx.index.names) == ["trade_date", "code"]
 
 
 def test_backtest_config_defaults_follow_profile():
@@ -322,8 +375,8 @@ def test_diversification_caps_missing_industry_as_unknown_bucket():
 def test_main_blocks_when_metadata_gate_fails(monkeypatch):
     monkeypatch.setattr(
         qpb,
-        "load_metadata_health",
-        lambda _data_dir: {"ok": True, "coverage_pct": 10.0, "age_days": 0.2, "file": "mock.csv"},
+        "load_ods_metadata_health",
+        lambda _asof_date: {"ok": True, "coverage_pct": 10.0, "age_days": 0.2, "file": "mock.csv"},
     )
     monkeypatch.setattr(
         qpb,
@@ -352,13 +405,8 @@ def test_main_blocks_when_metadata_gate_fails(monkeypatch):
 
 def test_build_backtest_manifest_writes_platform_run(tmp_path, monkeypatch):
     monkeypatch.setattr(qpb, "BASE_DIR", str(tmp_path))
-    monkeypatch.setattr(qpb, "DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr(qpb, "PARQUET_FILE", str(tmp_path / "data" / "daily_all_5y.parquet"))
     monkeypatch.setattr(qpb, "PROFILE_FILE", str(tmp_path / "config" / "quant_live_profiles.json"))
-    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "data" / "daily_all_5y.parquet").write_text("stub", encoding="utf-8")
-    (tmp_path / "data" / "stock_info.csv").write_text("ts_code,industry\n000001.SZ,银行\n", encoding="utf-8")
     (tmp_path / "config" / "quant_live_profiles.json").write_text("{}", encoding="utf-8")
 
     cfg = qpb.BacktestConfig(start="2025-01-01", end="2025-01-31")
@@ -368,4 +416,4 @@ def test_build_backtest_manifest_writes_platform_run(tmp_path, monkeypatch):
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["run_type"] == "quant_portfolio_backtest"
     assert payload["params"]["top_n"] == cfg.top_n
-    assert "daily_data" in payload["versions"]
+    assert payload["params"]["market_data"]["data_source"] == "ashare_ods"

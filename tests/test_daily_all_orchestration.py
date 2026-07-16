@@ -42,6 +42,23 @@ def test_get_auto_target_date_uses_today_after_cutoff(monkeypatch):
     assert daily_all.get_auto_target_date() == "20260414"
 
 
+def test_load_trade_calendar_info_normalizes_ods_coverage_keys(monkeypatch):
+    class _Gateway:
+        def available_trade_dates(self):
+            return ["2026-04-13", "2026-04-14"]
+
+        def daily_bar_counts(self, sessions):
+            assert sessions == ["2026-04-13", "2026-04-14"]
+            return {"2026-04-13": 3601, "2026-04-14": 3602}
+
+    monkeypatch.setattr(daily_all, "AShareMarketDataGateway", _Gateway)
+    monkeypatch.setenv("MFTS_PIPELINE_CALENDAR_DAYS", "30")
+
+    dates, counts = daily_all.load_trade_calendar_info()
+    assert dates == ["20260413", "20260414"]
+    assert counts == {"20260413": 3601, "20260414": 3602}
+
+
 def test_calc_verify_targets_respects_label_horizon():
     trade_dates = ["20260407", "20260408", "20260409", "20260410", "20260411"]
     trade_counts = {d: 3600 for d in trade_dates}
@@ -77,24 +94,23 @@ def test_calc_verify_targets_respects_label_horizon():
     assert c2c_targets == ["20260410"]
 
 
-def test_latest_mode_stops_when_data_update_fails(monkeypatch):
+def test_latest_mode_stops_when_ods_does_not_cover_target(monkeypatch):
     saved = {}
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260320")
     monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
-    monkeypatch.setattr(daily_all, "run_script", lambda *args, **kwargs: False)
     monkeypatch.setattr(daily_all, "save_state", lambda record: saved.setdefault("record", record))
     monkeypatch.setattr(sys, "argv", ["daily_all.py", "--mode", "latest", "--skip-profile-gate"])
 
     ok = daily_all.main()
     assert ok is False
-    assert saved["record"]["steps"]["data_update"] is False
+    assert saved["record"]["steps"]["data_availability"] is False
     assert saved["record"]["steps"]["mfts_scan"] is False
     assert saved["record"]["steps"]["ml_select"] is False
     assert saved["record"]["steps"]["verify"] is False
 
 
-def test_latest_mode_runs_data_scan_ml(monkeypatch):
+def test_latest_mode_uses_covered_ods_then_runs_scan_ml(monkeypatch):
     calls = []
 
     def fake_run_script(script_path, description="", script_args=None, extra_env=None):
@@ -109,7 +125,7 @@ def test_latest_mode_runs_data_scan_ml(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260320")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260320")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",
@@ -122,14 +138,10 @@ def test_latest_mode_runs_data_scan_ml(monkeypatch):
 
     ok = daily_all.main()
     assert ok is True
-    assert len(calls) == 3
+    assert len(calls) == 2
 
-    data_call = calls[0]
-    scan_call = calls[1]
-    ml_call = calls[2]
-
-    assert data_call["script_path"].endswith("scripts/daily_incremental_update.py")
-    assert data_call["script_args"] == ["--target-date", "20260320"]
+    scan_call = calls[0]
+    ml_call = calls[1]
 
     assert scan_call["script_path"].endswith("core/mfts_screener.py")
     assert scan_call["script_args"] == ["--date", "20260320"]
@@ -138,7 +150,7 @@ def test_latest_mode_runs_data_scan_ml(monkeypatch):
     assert ml_call["script_args"] == ["--date", "20260320"]
 
 
-def test_latest_mode_skips_data_update_when_latest_already_covered(monkeypatch):
+def test_latest_mode_does_not_invoke_data_update_when_ods_covers_target(monkeypatch):
     calls = []
 
     def fake_run_script(script_path, description="", script_args=None, extra_env=None):
@@ -202,49 +214,17 @@ def test_latest_mode_runs_profile_gate_by_default(monkeypatch):
     assert any(c["script_path"].endswith("scripts/quant_refresh_promotion_gate.py") for c in calls)
 
 
-def test_catchup_allows_intermediate_data_fail_if_final_target_reached(monkeypatch):
-    calls = []
-    latest_dates = iter(["20260403", "20260408"])
-
-    def fake_run_script(script_path, description="", script_args=None, extra_env=None):
-        calls.append(
-            {
-                "script_path": script_path,
-                "description": description,
-                "script_args": script_args or [],
-            }
-        )
-        # 模拟第一天失败，后两天成功
-        if description.endswith("20260406"):
-            return False
-        return True
+def test_catchup_stops_when_ods_is_behind_target_without_downloading(monkeypatch):
+    saved = {}
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260408")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: next(latest_dates))
-    monkeypatch.setattr(
-        daily_all,
-        "load_trade_calendar_info",
-        lambda: (
-            ["20260406", "20260407", "20260408"],
-            {"20260406": 3500, "20260407": 3500, "20260408": 3500},
-        ),
-    )
-    monkeypatch.setattr(
-        daily_all,
-        "business_dates_between",
-        lambda start_yyyymmdd, end_yyyymmdd: ["20260406", "20260407", "20260408"],
-    )
-    monkeypatch.setattr(daily_all, "list_stage_dates", lambda prefix, subdir_key: {"20260406", "20260407", "20260408"})
-    monkeypatch.setattr(daily_all, "run_script", fake_run_script)
-    monkeypatch.setattr(daily_all, "save_state", lambda record: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260403")
+    monkeypatch.setattr(daily_all, "save_state", lambda record: saved.setdefault("record", record))
     monkeypatch.setattr(sys, "argv", ["daily_all.py", "--mode", "catchup", "--skip-profile-gate"])
 
     ok = daily_all.main()
-    assert ok is True
-    assert len(calls) == 3
-    assert calls[0]["script_args"] == ["--target-date", "20260406"]
-    assert calls[1]["script_args"] == ["--target-date", "20260407"]
-    assert calls[2]["script_args"] == ["--target-date", "20260408"]
+    assert ok is False
+    assert saved["record"]["steps"]["data_availability"] is False
 
 
 def test_latest_mode_with_p1_p2_runs_optional_steps(monkeypatch):
@@ -262,7 +242,7 @@ def test_latest_mode_with_p1_p2_runs_optional_steps(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260320")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260320")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",
@@ -290,13 +270,13 @@ def test_latest_mode_with_p1_p2_runs_optional_steps(monkeypatch):
 
     ok = daily_all.main()
     assert ok is True
-    assert len(calls) == 5
-    assert calls[3]["script_path"].endswith("scripts/quant_p1_analytics.py")
-    assert calls[4]["script_path"].endswith("scripts/quant_p2_paper_trade.py")
-    assert "--date" in calls[4]["script_args"]
-    assert "20260320" in calls[4]["script_args"]
-    assert "--broker" in calls[4]["script_args"]
-    assert "paper" in calls[4]["script_args"]
+    assert len(calls) == 4
+    assert calls[2]["script_path"].endswith("scripts/quant_p1_analytics.py")
+    assert calls[3]["script_path"].endswith("scripts/quant_p2_paper_trade.py")
+    assert "--date" in calls[3]["script_args"]
+    assert "20260320" in calls[3]["script_args"]
+    assert "--broker" in calls[3]["script_args"]
+    assert "paper" in calls[3]["script_args"]
 
 
 def test_latest_mode_with_p3_runs_consistency_step(monkeypatch):
@@ -314,7 +294,7 @@ def test_latest_mode_with_p3_runs_consistency_step(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260320")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260408")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",
@@ -340,7 +320,7 @@ def test_latest_mode_with_p3_runs_consistency_step(monkeypatch):
 
     ok = daily_all.main()
     assert ok is True
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert calls[-1]["script_path"].endswith("scripts/quant_exec_consistency_report.py")
     assert "--broker" in calls[-1]["script_args"]
     assert "paper" in calls[-1]["script_args"]
@@ -361,7 +341,7 @@ def test_latest_mode_with_p2_recommendation_flags(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260408")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260408")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",
@@ -419,7 +399,7 @@ def test_latest_mode_with_p2_risk_tuning_flags(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260408")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260408")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",
@@ -512,7 +492,7 @@ def test_latest_mode_blocks_p2_when_industry_coverage_gate_fails(monkeypatch):
         return True
 
     monkeypatch.setattr(daily_all, "get_auto_target_date", lambda: "20260408")
-    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: None)
+    monkeypatch.setattr(daily_all, "load_latest_data_date", lambda: "20260408")
     monkeypatch.setattr(
         daily_all,
         "load_trade_calendar_info",

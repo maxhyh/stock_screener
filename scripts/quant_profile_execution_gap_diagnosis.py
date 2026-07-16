@@ -31,10 +31,10 @@ sys.path.insert(0, str(BASE_DIR / "scripts"))
 
 from quant_profile_ab_compare import _build_cfg, _load_profiles
 from quant_portfolio_backtest import backtest_portfolio
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 OUTPUT_DIR = BASE_DIR / "output"
 BACKTEST_DIR = OUTPUT_DIR / "backtest"
 EXEC_DIR = OUTPUT_DIR / "execution"
-DATA_DIR = BASE_DIR / "data"
 
 
 @dataclass
@@ -73,21 +73,8 @@ def _find_latest_file(patterns: list[str]) -> str:
     return str(max(existing, key=lambda p: p.stat().st_mtime_ns))
 
 
-def _load_industry_map(meta_file: Path) -> dict[str, str]:
-    if not meta_file.exists():
-        return {}
-    df = pd.read_csv(meta_file, dtype=str)
-    if df.empty:
-        return {}
-    code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-    ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-    if not code_col or not ind_col:
-        return {}
-    work = df[[code_col, ind_col]].copy()
-    work[code_col] = work[code_col].astype(str).str.extract(r"(\d{6})", expand=False).fillna("")
-    work[ind_col] = work[ind_col].astype(str).fillna("").str.strip().replace({"nan": "", "None": ""})
-    work = work[(work[code_col] != "")]
-    return dict(zip(work[code_col], work[ind_col]))
+def _load_industry_map(asof_date: object) -> dict[str, str]:
+    return load_ods_industry_map(asof_date=asof_date)
 
 
 def _normalize_code(raw: Any) -> str:
@@ -471,7 +458,7 @@ def main() -> int:
     _log(f"P2 摘要: {p2_summary_file}")
     _log(f"回测诊断区间: {start} ~ {end}")
 
-    industry_map = _load_industry_map(DATA_DIR / "stock_info.csv")
+    industry_map = _load_industry_map(end)
 
     diagnosis_items: list[ProfileDiagnosis] = []
     for profile in profiles:

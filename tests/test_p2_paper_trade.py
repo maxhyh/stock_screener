@@ -8,7 +8,14 @@ import pytest
 
 from core.execution import create_broker
 from core.execution.paper_broker import PaperBroker, PaperBrokerStateError
-from scripts.quant_p2_paper_trade import _rebalance as _legacy_script_rebalance
+from scripts.quant_p2_paper_trade import (
+    _assign_profile_target_weights,
+    _classify_executable_pool_halt_reason,
+    _external_target_weight_budget,
+    _load_signal_df_with_stats,
+    _rebalance as _legacy_script_rebalance,
+)
+import scripts.quant_p2_paper_trade as p2_trade
 
 
 def _bars_idx_for_date(trade_date: str, locked_up: bool = False) -> pd.DataFrame:
@@ -49,6 +56,130 @@ def _signal_df() -> pd.DataFrame:
             "排名_num": [1, 2],
         }
     )
+
+
+def test_p2_load_bars_uses_bounded_ods_execution_window(monkeypatch):
+    source = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2026-04-01", "2026-04-02"]),
+            "code": ["000001", "000001"],
+            "open": [10.0, 10.2],
+            "high": [10.1, 10.3],
+            "low": [9.9, 10.1],
+            "close": [10.0, 10.2],
+            "vol": [100.0, 110.0],
+            "amount": [1_000_000.0, 1_100_000.0],
+            "prev_close": [9.8, 10.0],
+            "amount_ma20": [1_000_000.0, 1_050_000.0],
+            "amount_min5": [1_000_000.0, 1_000_000.0],
+            "amount_min10": [1_000_000.0, 1_000_000.0],
+        }
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_load_execution_bars(start, end, *, lookback_sessions, forward_sessions, include_bj9):
+        calls.append(
+            {
+                "start": str(start),
+                "end": str(end),
+                "lookback_sessions": lookback_sessions,
+                "forward_sessions": forward_sessions,
+                "include_bj9": include_bj9,
+            }
+        )
+        return source.copy(), source.set_index(["trade_date", "code"]), {"data_source": "ashare_ods"}
+
+    p2_trade._BARS_CACHE = None
+    monkeypatch.setattr(p2_trade, "load_execution_bars", fake_load_execution_bars, raising=False)
+
+    out = p2_trade._load_bars("2026-04-01", "2026-04-02")
+
+    assert calls == [
+        {
+            "start": "2026-04-01",
+            "end": "2026-04-02",
+            "lookback_sessions": 20,
+            "forward_sessions": 1,
+            "include_bj9": False,
+        }
+    ]
+    assert out.attrs["market_data_lineage"]["data_source"] == "ashare_ods"
+
+
+def test_p2_profile_target_weights_honor_reserve_cap():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003", "000004"],
+            "名称": ["A", "B", "C", "D"],
+            "ML评分": [0.95, 0.90, 0.85, 0.80],
+            "reserve_candidate": [0, 0, 1, 1],
+            "amount_ma20": [200_000_000.0] * 4,
+        }
+    )
+
+    out = _assign_profile_target_weights(
+        signal_df=signal_df,
+        profile_cfg={
+            "optimizer_mode": "capacity_crowding_aware",
+            "target_score_col": "ML评分",
+            "target_max_reserve_weight": 0.02,
+            "redistribute_clipped_weight": True,
+            "target_max_industry_weight": 1.0,
+            "target_capacity_amount_col": "amount_ma20",
+            "target_capacity_amount_buffer": 1.0,
+            "target_capital_base": 1_000_000.0,
+            "min_valid_positions": 1,
+        },
+        total_target_pos=0.40,
+        max_single_pos=0.15,
+        industry_map={"000001": "I1", "000002": "I2", "000003": "I3", "000004": "I4"},
+        primary_top_n=2,
+    )
+
+    reserve_weight = float(
+        pd.to_numeric(out.loc[out["reserve_candidate"].astype(int).gt(0), "target_weight"], errors="coerce")
+        .fillna(0.0)
+        .sum()
+    )
+    assert 0.0 < reserve_weight <= 0.02 + 1e-12
+
+
+def test_p2_profile_target_weights_honor_exit_trap_caps():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003"],
+            "名称": ["A", "B", "C"],
+            "ML评分": [0.95, 0.90, 0.85],
+            "exit_trap_risk_score": [0.90, 0.80, 0.70],
+            "amount_ma20": [200_000_000.0] * 3,
+        }
+    )
+
+    out = _assign_profile_target_weights(
+        signal_df=signal_df,
+        profile_cfg={
+            "optimizer_mode": "capacity_crowding_aware",
+            "target_score_col": "ML评分",
+            "target_exit_trap_risk_threshold": 0.65,
+            "target_max_exit_trap_weight": 0.07,
+            "target_max_exit_trap_single_weight": 0.03,
+            "redistribute_clipped_weight": True,
+            "target_max_industry_weight": 1.0,
+            "target_capacity_amount_col": "amount_ma20",
+            "target_capacity_amount_buffer": 1.0,
+            "target_capital_base": 1_000_000.0,
+            "min_valid_positions": 1,
+        },
+        total_target_pos=0.30,
+        max_single_pos=0.20,
+        industry_map={"000001": "I1", "000002": "I2", "000003": "I3"},
+        primary_top_n=3,
+    )
+
+    high_risk = out[pd.to_numeric(out["exit_trap_risk_score"], errors="coerce").fillna(0.0).ge(0.65)]
+    high_risk_weight = float(pd.to_numeric(high_risk["target_weight"], errors="coerce").fillna(0.0).sum())
+    assert 0.0 < high_risk_weight <= 0.07 + 1e-12
+    assert float(pd.to_numeric(high_risk["target_weight"], errors="coerce").fillna(0.0).max()) <= 0.03 + 1e-12
 
 
 def _bars_idx_three_for_date(trade_date: str) -> pd.DataFrame:
@@ -98,6 +229,67 @@ def test_create_broker_returns_paper_instance(tmp_path):
         stamp_tax_bps=10.0,
     )
     assert isinstance(broker, PaperBroker)
+
+
+def test_load_signal_df_classifies_bj_only_as_empty_after_universe_filter(tmp_path):
+    fp = tmp_path / "daily_20260319.csv"
+    fp.write_text("代码,名称,ML评分\n920001,BJ1,0.9\n920002,BJ2,0.8\n", encoding="utf-8-sig")
+
+    df, stats = _load_signal_df_with_stats(fp, top_n=10, include_bj9=False, exclude_st=True)
+
+    assert df.empty
+    assert int(stats["empty_signal"]) == 1
+    assert stats["empty_signal_reason"] == "empty_after_universe_filter"
+    assert int(stats["raw_rows"]) == 2
+    assert int(stats["filtered_bj9_rows"]) == 2
+    assert int(stats["post_filter_rows"]) == 0
+
+
+def test_load_signal_df_classifies_raw_empty_signal(tmp_path):
+    fp = tmp_path / "daily_20260320.csv"
+    fp.write_text("代码,名称,ML评分\n", encoding="utf-8-sig")
+
+    df, stats = _load_signal_df_with_stats(fp, top_n=10, include_bj9=False, exclude_st=True)
+
+    assert df.empty
+    assert int(stats["empty_signal"]) == 1
+    assert stats["empty_signal_reason"] == "empty_signal_raw"
+
+
+def test_external_target_weight_budget_caps_p2_reoptimization_budget():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003"],
+            "target_weight": [0.012, 0.018, 0.0],
+            "target_weight_checksum": ["abc", "abc", "abc"],
+        }
+    )
+
+    out = _external_target_weight_budget(signal_df)
+
+    assert out["has_external_target_weight"] is True
+    assert out["target_weight_sum"] == pytest.approx(0.03)
+    assert int(out["target_weight_positive_count"]) == 2
+    assert out["target_weight_max"] == pytest.approx(0.018)
+    assert out["target_weight_checksum"] == "abc"
+
+
+def test_external_target_weight_budget_preserves_explicit_zero_budget():
+    signal_df = pd.DataFrame(
+        {
+            "代码": ["000001", "000002"],
+            "target_weight": [0.0, 0.0],
+            "target_weight_checksum": ["zero", "zero"],
+        }
+    )
+
+    out = _external_target_weight_budget(signal_df)
+
+    assert out["has_external_target_weight"] is True
+    assert out["target_weight_sum"] == pytest.approx(0.0)
+    assert int(out["target_weight_positive_count"]) == 0
+    assert out["target_weight_max"] == pytest.approx(0.0)
+    assert out["target_weight_checksum"] == "zero"
 
 
 def test_rebalance_generates_buy_orders_and_positions(tmp_path):
@@ -203,6 +395,83 @@ def test_rebalance_uses_all_positive_external_target_weights_beyond_topn(tmp_pat
     assert result.ledger_row["target_weight_sum"] == pytest.approx(0.60)
 
 
+def test_rebalance_explicit_zero_external_target_is_risk_off_exit_only(tmp_path):
+    broker = PaperBroker(
+        state_file=tmp_path / "paper_state.json",
+        initial_capital=1_000_000,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+    )
+    signal_df = _signal_df()
+    signal_df["target_weight"] = [0.0, 0.0]
+
+    result = broker.rebalance_on_state(
+        state={
+            "cash": 900_000.0,
+            "positions": {"000001": {"name": "平安银行", "qty": 10_000, "avg_cost": 9.5}},
+        },
+        signal_df=signal_df,
+        bars_idx=_bars_idx_for_date("2026-03-21"),
+        signal_date=pd.Timestamp("2026-03-20"),
+        trade_date=pd.Timestamp("2026-03-21"),
+        run_id="explicit_zero_target_risk_off",
+        top_n=2,
+        target_total_pos=0.0,
+        max_single_pos=0.6,
+    )
+
+    assert set(result.orders_df["side"]) == {"SELL"}
+    assert set(result.orders_df["status"]) == {"filled"}
+    assert result.state["positions"] == {}
+    assert result.ledger_row["target_weight_sum"] == pytest.approx(0.0)
+    assert result.ledger_row["target_weight_source"] == "external_target_weight"
+
+
+def test_rebalance_empty_signal_is_risk_off_exit_only(tmp_path):
+    broker = PaperBroker(
+        state_file=tmp_path / "paper_state.json",
+        initial_capital=1_000_000,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+    )
+
+    result = broker.rebalance_on_state(
+        state={
+            "cash": 900_000.0,
+            "positions": {"000001": {"name": "平安银行", "qty": 10_000, "avg_cost": 9.5}},
+        },
+        signal_df=pd.DataFrame(columns=["代码", "名称", "ML评分", "排名_num", "target_weight"]),
+        bars_idx=_bars_idx_for_date("2026-03-21"),
+        signal_date=pd.Timestamp("2026-03-20"),
+        trade_date=pd.Timestamp("2026-03-21"),
+        run_id="empty_signal_risk_off",
+        top_n=2,
+        target_total_pos=0.0,
+        max_single_pos=0.6,
+    )
+
+    assert set(result.orders_df["side"]) == {"SELL"}
+    assert set(result.orders_df["status"]) == {"filled"}
+    assert result.state["positions"] == {}
+    assert float(result.state["cash"]) > 900_000.0
+    assert result.ledger_row["target_weight_sum"] == pytest.approx(0.0)
+
+
+def test_executable_pool_halt_reason_classifies_mixed_gate_hits():
+    reason = _classify_executable_pool_halt_reason(
+        {
+            "entry_not_tradable_hit": 2,
+            "adv_limits_hit": 8,
+            "style_limits_hit": 3,
+        }
+    )
+    assert reason == "pretrade_empty:entry_not_tradable+adv_capacity+style_exposure"
+
+
 def test_legacy_script_rebalance_delegates_to_canonical_target_weight_path():
     signal_df = _signal_df()
     signal_df["target_weight"] = [0.10, 0.50]
@@ -304,8 +573,11 @@ def test_rebalance_tracks_blocked_exit_state_and_freezes_new_buys(tmp_path):
     assert orders.loc[("BUY", "000002"), "status"] == "blocked"
     assert orders.loc[("BUY", "000002"), "reason"] == "blocked_exit_freeze"
     assert int(result.ledger_row["blocked_exit_buy_freeze"]) == 1
+    assert result.ledger_row["blocked_exit_freeze_reason"] == "same_day_exit_block"
     assert int(result.ledger_row["blocked_exit_freeze_orders"]) == 1
     assert float(result.ledger_row["blocked_sell_current_weight"]) > 0.02
+    assert float(result.ledger_row["blocked_exit_freeze_sell_weight"]) > 0.02
+    assert float(result.ledger_row["active_blocked_sell_state_count"]) == 0.0
     blocked_state = result.state["blocked_order_state"]
     assert "SELL:000001" in blocked_state
     assert "BUY:000002" in blocked_state
@@ -323,8 +595,79 @@ def test_rebalance_tracks_blocked_exit_state_and_freezes_new_buys(tmp_path):
         max_single_pos=0.30,
     )
     second_state = second.state["blocked_order_state"]
+    assert second.ledger_row["blocked_exit_freeze_reason"] == "same_day_exit_block+active_blocked_sell_state"
+    assert float(second.ledger_row["active_blocked_sell_state_count"]) == 1.0
+    assert float(second.ledger_row["active_blocked_sell_state_weight"]) > 0.02
     assert int(second_state["SELL:000001"]["total_blocked_days"]) == 2
     assert int(second_state["SELL:000001"]["consecutive_days"]) == 1
+
+
+def test_blocked_sell_order_preserves_entry_tradability_lineage(tmp_path):
+    broker = PaperBroker(
+        state_file=tmp_path / "paper_state.json",
+        initial_capital=1_000_000,
+        lot_size=100,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        stamp_tax_bps=0.0,
+        blocked_state_enabled=True,
+        block_buy_on_exit_blocked=False,
+    )
+    buy_signal = pd.DataFrame(
+        {
+            "代码": ["000001"],
+            "名称": ["平安银行"],
+            "ML评分": [0.9],
+            "排名_num": [1],
+            "target_weight": [0.30],
+            "tradability_safe_score": [0.25],
+            "tradability_entry_risk_score": [0.75],
+            "tradability_limit_headroom_pct": [0.80],
+            "exit_trap_safe_score": [0.20],
+            "exit_trap_risk_score": [0.80],
+            "exit_trap_downside_headroom_pct": [0.60],
+            "reserve_candidate": [1],
+        }
+    )
+
+    first = broker.rebalance_on_state(
+        state={"cash": 1_000_000.0, "positions": {}},
+        signal_df=buy_signal,
+        bars_idx=_bars_idx_for_date("2026-03-27"),
+        signal_date=pd.Timestamp("2026-03-26"),
+        trade_date=pd.Timestamp("2026-03-27"),
+        run_id="entry_lineage_buy",
+        top_n=1,
+        target_total_pos=0.30,
+        max_single_pos=0.30,
+    )
+    assert float(first.state["positions"]["000001"]["entry_tradability_safe_score"]) == 0.25
+
+    second = broker.rebalance_on_state(
+        state=first.state,
+        signal_df=pd.DataFrame(columns=["代码", "名称", "ML评分", "排名_num", "target_weight"]),
+        bars_idx=_bars_idx_blocked_exit_and_buy("2026-03-30"),
+        signal_date=pd.Timestamp("2026-03-27"),
+        trade_date=pd.Timestamp("2026-03-30"),
+        run_id="entry_lineage_blocked_sell",
+        top_n=1,
+        target_total_pos=0.0,
+        max_single_pos=0.30,
+    )
+
+    sell = second.orders_df[second.orders_df["side"].eq("SELL")].iloc[0]
+    assert sell["status"] == "blocked"
+    assert sell["reason"] == "exit_not_tradable"
+    assert float(sell["position_entry_tradability_safe_score"]) == 0.25
+    assert float(sell["position_entry_risk_score"]) == 0.75
+    assert float(sell["position_entry_exit_trap_risk_score"]) == 0.80
+    assert int(sell["position_entry_reserve_candidate"]) == 1
+    assert float(second.ledger_row["blocked_sell_entry_risk_score_weighted_mean"]) == 0.75
+    assert float(second.ledger_row["blocked_sell_entry_exit_trap_risk_score_weighted_mean"]) == 0.80
+    assert int(second.ledger_row["blocked_sell_high_entry_risk_orders"]) == 1
+    assert int(second.ledger_row["blocked_sell_high_entry_exit_trap_risk_orders"]) == 1
+    assert int(second.ledger_row["blocked_sell_low_entry_safety_orders"]) == 1
+    assert int(second.ledger_row["blocked_sell_reserve_entry_orders"]) == 1
 
 
 def test_paper_broker_requires_explicit_reset_when_state_is_corrupt(tmp_path):

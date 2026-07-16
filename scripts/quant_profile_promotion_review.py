@@ -31,6 +31,14 @@ OUTPUT_DIR = BASE_DIR / "output"
 BACKTEST_DIR = OUTPUT_DIR / "backtest"
 EXEC_DIR = OUTPUT_DIR / "execution"
 PROFILE_FILE = BASE_DIR / "config" / "quant_live_profiles.json"
+MAX_EXECUTABLE_POOL_HALT_RATE_PCT = 5.0
+MAX_EXECUTABLE_POOL_HALT_DAYS = 5.0
+MAX_EMPTY_SIGNAL_RATE_PCT = 5.0
+MAX_EMPTY_SIGNAL_RELATIVE_WORSE_PCT = 2.0
+MAX_SELL_TRAP_CLUSTER_DAYS = 0.0
+MAX_RESERVE_SELL_TRAP_ORDERS = 0.0
+MAX_TRADABILITY_CLUSTER_DAYS = 2.0
+MAX_ADV_CLUSTER_DAYS = 2.0
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -146,6 +154,24 @@ def _summarize_p2_ledgers(profiles: list[str], ledgers: list[Path], min_days: in
                 "risk_block_rate_pct": float(metrics.get("risk_block_rate_pct", 0.0)),
                 "style_hit_rate_pct": float(metrics.get("style_hit_rate_pct", 0.0)),
                 "target_weight_sum_mean": float(metrics.get("target_weight_sum_mean", 0.0)),
+                "upstream_target_weight_overrun_max": float(metrics.get("upstream_target_weight_overrun_max", 0.0)),
+                "upstream_target_weight_underuse_max": float(metrics.get("upstream_target_weight_underuse_max", 0.0)),
+                "empty_signal_days": float(metrics.get("empty_signal_days", 0.0)),
+                "empty_signal_rate_pct": float(metrics.get("empty_signal_rate_pct", 0.0)),
+                "empty_signal_raw_days": float(metrics.get("empty_signal_raw_days", 0.0)),
+                "empty_after_universe_filter_days": float(metrics.get("empty_after_universe_filter_days", 0.0)),
+                "empty_signal_raw_rows_sum": float(metrics.get("empty_signal_raw_rows_sum", 0.0)),
+                "empty_signal_filtered_bj9_rows_sum": float(metrics.get("empty_signal_filtered_bj9_rows_sum", 0.0)),
+                "empty_signal_filtered_st_rows_sum": float(metrics.get("empty_signal_filtered_st_rows_sum", 0.0)),
+                "executable_pool_halt_days": float(metrics.get("executable_pool_halt_days", 0.0)),
+                "executable_pool_halt_rate_pct": float(metrics.get("executable_pool_halt_rate_pct", 0.0)),
+                "executable_pool_halt_adv_hit_sum": float(metrics.get("executable_pool_halt_adv_hit_sum", 0.0)),
+                "executable_pool_halt_entry_not_tradable_hit_sum": float(
+                    metrics.get("executable_pool_halt_entry_not_tradable_hit_sum", 0.0)
+                ),
+                "executable_pool_halt_style_hit_sum": float(metrics.get("executable_pool_halt_style_hit_sum", 0.0)),
+                "broker_entry_not_tradable_orders": float(metrics.get("broker_entry_not_tradable_orders", 0.0)),
+                "broker_exit_not_tradable_orders": float(metrics.get("broker_exit_not_tradable_orders", 0.0)),
                 "objective_score": float(
                     _p2_objective_score(
                         nav_return_pct=float(metrics.get("nav_return_pct", 0.0)),
@@ -172,6 +198,27 @@ def _summarize_p2_ledgers(profiles: list[str], ledgers: list[Path], min_days: in
                 "p2_risk_block_rate_mean",
                 "p2_style_hit_rate_mean",
                 "p2_target_weight_sum_mean",
+                "p2_signal_calendar_shortfall_days_total",
+                "p2_signal_calendar_shortfall_days_max",
+                "p2_signal_calendar_coverage_min_pct",
+                "p2_upstream_target_weight_overrun_max",
+                "p2_upstream_target_weight_underuse_max",
+                "p2_empty_signal_days_total",
+                "p2_empty_signal_rate_mean_pct",
+                "p2_empty_signal_raw_days_total",
+                "p2_empty_after_universe_filter_days_total",
+                "p2_empty_signal_raw_rows_sum",
+                "p2_empty_signal_filtered_bj9_rows_sum",
+                "p2_empty_signal_filtered_st_rows_sum",
+                "p2_broker_entry_not_tradable_orders_sum",
+                "p2_broker_exit_not_tradable_orders_sum",
+                "p2_broker_tradability_block_orders_sum",
+                "p2_executable_pool_halt_days_total",
+                "p2_executable_pool_halt_rate_mean_pct",
+                "p2_executable_pool_halt_days_max",
+                "p2_executable_pool_halt_adv_hit_sum",
+                "p2_executable_pool_halt_entry_not_tradable_hit_sum",
+                "p2_executable_pool_halt_style_hit_sum",
                 "p2_objective_mean",
                 "p2_min_days_gate",
             ]
@@ -196,12 +243,37 @@ def _summarize_p2_ledgers(profiles: list[str], ledgers: list[Path], min_days: in
                 "p2_risk_block_rate_mean": float(pd.to_numeric(g["risk_block_rate_pct"], errors="coerce").mean()),
                 "p2_style_hit_rate_mean": float(pd.to_numeric(g["style_hit_rate_pct"], errors="coerce").mean()),
                 "p2_target_weight_sum_mean": float(pd.to_numeric(g["target_weight_sum_mean"], errors="coerce").mean()),
+                "p2_signal_calendar_shortfall_days_total": 0.0,
+                "p2_signal_calendar_shortfall_days_max": 0.0,
+                "p2_signal_calendar_coverage_min_pct": 100.0,
+                "p2_upstream_target_weight_overrun_max": float(_num_col("upstream_target_weight_overrun_max").max()),
+                "p2_upstream_target_weight_underuse_max": float(_num_col("upstream_target_weight_underuse_max").max()),
+                "p2_empty_signal_days_total": float(_num_col("empty_signal_days").sum()),
+                "p2_empty_signal_rate_mean_pct": float(_num_col("empty_signal_rate_pct").mean()),
+                "p2_empty_signal_raw_days_total": float(_num_col("empty_signal_raw_days").sum()),
+                "p2_empty_after_universe_filter_days_total": float(_num_col("empty_after_universe_filter_days").sum()),
+                "p2_empty_signal_raw_rows_sum": float(_num_col("empty_signal_raw_rows_sum").sum()),
+                "p2_empty_signal_filtered_bj9_rows_sum": float(_num_col("empty_signal_filtered_bj9_rows_sum").sum()),
+                "p2_empty_signal_filtered_st_rows_sum": float(_num_col("empty_signal_filtered_st_rows_sum").sum()),
                 "p2_target_weight_source_external_rate_pct": float(_num_col("target_weight_source_external_rate_pct").mean()),
                 "p2_target_weight_checksum_coverage_pct": float(_num_col("target_weight_checksum_coverage_pct").mean()),
                 "p2_entry_not_tradable_orders_sum": float(_num_col("entry_not_tradable_orders").sum()),
                 "p2_exit_not_tradable_orders_sum": float(_num_col("exit_not_tradable_orders").sum()),
+                "p2_broker_entry_not_tradable_orders_sum": float(_num_col("broker_entry_not_tradable_orders").sum()),
+                "p2_broker_exit_not_tradable_orders_sum": float(_num_col("broker_exit_not_tradable_orders").sum()),
+                "p2_broker_tradability_block_orders_sum": float(
+                    _num_col("broker_entry_not_tradable_orders").sum() + _num_col("broker_exit_not_tradable_orders").sum()
+                ),
                 "p2_blocked_target_weight_sum": float(_num_col("blocked_target_weight_sum").sum()),
                 "p2_max_daily_tradability_blocked_orders": float(_num_col("max_daily_tradability_blocked_orders").max()),
+                "p2_executable_pool_halt_days_total": float(_num_col("executable_pool_halt_days").sum()),
+                "p2_executable_pool_halt_rate_mean_pct": float(_num_col("executable_pool_halt_rate_pct").mean()),
+                "p2_executable_pool_halt_days_max": float(_num_col("executable_pool_halt_days").max()),
+                "p2_executable_pool_halt_adv_hit_sum": float(_num_col("executable_pool_halt_adv_hit_sum").sum()),
+                "p2_executable_pool_halt_entry_not_tradable_hit_sum": float(
+                    _num_col("executable_pool_halt_entry_not_tradable_hit_sum").sum()
+                ),
+                "p2_executable_pool_halt_style_hit_sum": float(_num_col("executable_pool_halt_style_hit_sum").sum()),
                 "p2_objective_mean": float(pd.to_numeric(g["objective_score"], errors="coerce").mean()),
             }
         )
@@ -314,16 +386,59 @@ def _load_or_build_p2_summary(
             if not df.empty:
                 if "target_weight_sum_mean" not in df.columns:
                     df["target_weight_sum_mean"] = float("nan")
+                if "window" in df.columns and "signal_days" in df.columns:
+                    windows = pd.to_numeric(df["window"], errors="coerce")
+                    signal_days = pd.to_numeric(df["signal_days"], errors="coerce")
+                    derived_shortfall = (windows - signal_days).clip(lower=0).fillna(0.0)
+                    derived_coverage = (signal_days / windows.replace(0, pd.NA) * 100.0).fillna(100.0)
+                    if "signal_calendar_shortfall_days" not in df.columns:
+                        df["signal_calendar_shortfall_days"] = derived_shortfall
+                    else:
+                        existing_shortfall = pd.to_numeric(df["signal_calendar_shortfall_days"], errors="coerce")
+                        df["signal_calendar_shortfall_days"] = existing_shortfall.fillna(derived_shortfall)
+                    if "signal_calendar_coverage_pct" not in df.columns:
+                        df["signal_calendar_coverage_pct"] = derived_coverage
+                    else:
+                        existing_coverage = pd.to_numeric(df["signal_calendar_coverage_pct"], errors="coerce")
+                        df["signal_calendar_coverage_pct"] = existing_coverage.fillna(derived_coverage)
+                had_broker_entry_col = "broker_entry_not_tradable_orders" in df.columns
+                had_broker_exit_col = "broker_exit_not_tradable_orders" in df.columns
                 for c in [
                     "target_weight_source_external_rate_pct",
                     "target_weight_checksum_coverage_pct",
+                    "upstream_target_weight_overrun_max",
+                    "upstream_target_weight_underuse_max",
                     "entry_not_tradable_orders",
                     "exit_not_tradable_orders",
+                    "broker_entry_not_tradable_orders",
+                    "broker_exit_not_tradable_orders",
                     "blocked_target_weight_sum",
                     "max_daily_tradability_blocked_orders",
+                    "empty_signal_days",
+                    "empty_signal_rate_pct",
+                    "empty_signal_raw_days",
+                    "empty_after_universe_filter_days",
+                    "empty_signal_raw_rows_sum",
+                    "empty_signal_filtered_bj9_rows_sum",
+                    "empty_signal_filtered_st_rows_sum",
+                    "executable_pool_halt_days",
+                    "executable_pool_halt_rate_pct",
+                    "executable_pool_halt_adv_hit_sum",
+                    "executable_pool_halt_entry_not_tradable_hit_sum",
+                    "executable_pool_halt_style_hit_sum",
+                    "signal_calendar_shortfall_days",
+                    "signal_calendar_coverage_pct",
                 ]:
                     if c not in df.columns:
-                        df[c] = 0.0
+                        df[c] = 100.0 if c == "signal_calendar_coverage_pct" else 0.0
+                if not had_broker_entry_col:
+                    df["broker_entry_not_tradable_orders"] = df["entry_not_tradable_orders"]
+                if not had_broker_exit_col:
+                    df["broker_exit_not_tradable_orders"] = df["exit_not_tradable_orders"]
+                df["broker_tradability_block_orders"] = (
+                    pd.to_numeric(df["broker_entry_not_tradable_orders"], errors="coerce").fillna(0.0)
+                    + pd.to_numeric(df["broker_exit_not_tradable_orders"], errors="coerce").fillna(0.0)
+                )
                 agg = (
                     df.groupby("profile", dropna=False)
                     .agg(
@@ -336,12 +451,36 @@ def _load_or_build_p2_summary(
                         p2_risk_block_rate_mean=("risk_block_rate_pct", "mean"),
                         p2_style_hit_rate_mean=("style_hit_rate_pct", "mean"),
                         p2_target_weight_sum_mean=("target_weight_sum_mean", "mean"),
+                        p2_signal_calendar_shortfall_days_total=("signal_calendar_shortfall_days", "sum"),
+                        p2_signal_calendar_shortfall_days_max=("signal_calendar_shortfall_days", "max"),
+                        p2_signal_calendar_coverage_min_pct=("signal_calendar_coverage_pct", "min"),
+                        p2_upstream_target_weight_overrun_max=("upstream_target_weight_overrun_max", "max"),
+                        p2_upstream_target_weight_underuse_max=("upstream_target_weight_underuse_max", "max"),
                         p2_target_weight_source_external_rate_pct=("target_weight_source_external_rate_pct", "mean"),
                         p2_target_weight_checksum_coverage_pct=("target_weight_checksum_coverage_pct", "mean"),
                         p2_entry_not_tradable_orders_sum=("entry_not_tradable_orders", "sum"),
                         p2_exit_not_tradable_orders_sum=("exit_not_tradable_orders", "sum"),
+                        p2_broker_entry_not_tradable_orders_sum=("broker_entry_not_tradable_orders", "sum"),
+                        p2_broker_exit_not_tradable_orders_sum=("broker_exit_not_tradable_orders", "sum"),
+                        p2_broker_tradability_block_orders_sum=("broker_tradability_block_orders", "sum"),
                         p2_blocked_target_weight_sum=("blocked_target_weight_sum", "sum"),
                         p2_max_daily_tradability_blocked_orders=("max_daily_tradability_blocked_orders", "max"),
+                        p2_empty_signal_days_total=("empty_signal_days", "sum"),
+                        p2_empty_signal_rate_mean_pct=("empty_signal_rate_pct", "mean"),
+                        p2_empty_signal_raw_days_total=("empty_signal_raw_days", "sum"),
+                        p2_empty_after_universe_filter_days_total=("empty_after_universe_filter_days", "sum"),
+                        p2_empty_signal_raw_rows_sum=("empty_signal_raw_rows_sum", "sum"),
+                        p2_empty_signal_filtered_bj9_rows_sum=("empty_signal_filtered_bj9_rows_sum", "sum"),
+                        p2_empty_signal_filtered_st_rows_sum=("empty_signal_filtered_st_rows_sum", "sum"),
+                        p2_executable_pool_halt_days_total=("executable_pool_halt_days", "sum"),
+                        p2_executable_pool_halt_rate_mean_pct=("executable_pool_halt_rate_pct", "mean"),
+                        p2_executable_pool_halt_days_max=("executable_pool_halt_days", "max"),
+                        p2_executable_pool_halt_adv_hit_sum=("executable_pool_halt_adv_hit_sum", "sum"),
+                        p2_executable_pool_halt_entry_not_tradable_hit_sum=(
+                            "executable_pool_halt_entry_not_tradable_hit_sum",
+                            "sum",
+                        ),
+                        p2_executable_pool_halt_style_hit_sum=("executable_pool_halt_style_hit_sum", "sum"),
                         p2_objective_mean=("objective_score", "mean"),
                     )
                     .reset_index()
@@ -386,6 +525,19 @@ def _load_shadow_diagnosis(path: Path | None, profiles: list[str]) -> pd.DataFra
         "worst_top_industry_nav_weight_pct": "shadow_worst_top_industry_nav_weight_pct",
         "mean_industry_nav_hhi": "shadow_mean_industry_nav_hhi",
         "worst_industry_nav_hhi": "shadow_worst_industry_nav_hhi",
+        "executable_pool_halt_days_total": "shadow_executable_pool_halt_days_total",
+        "executable_pool_halt_rate_mean_pct": "shadow_executable_pool_halt_rate_mean_pct",
+        "executable_pool_halt_adv_hit_sum": "shadow_executable_pool_halt_adv_hit_sum",
+        "executable_pool_halt_entry_not_tradable_hit_sum": "shadow_executable_pool_halt_entry_not_tradable_hit_sum",
+        "executable_pool_halt_style_hit_sum": "shadow_executable_pool_halt_style_hit_sum",
+        "empty_signal_days_total": "shadow_empty_signal_days_total",
+        "empty_signal_rate_mean_pct": "shadow_empty_signal_rate_mean_pct",
+        "empty_signal_raw_days_total": "shadow_empty_signal_raw_days_total",
+        "empty_after_universe_filter_days_total": "shadow_empty_after_universe_filter_days_total",
+        "empty_signal_filtered_bj9_rows_sum": "shadow_empty_signal_filtered_bj9_rows_sum",
+        "broker_entry_not_tradable_orders_sum": "shadow_broker_entry_not_tradable_orders_sum",
+        "broker_exit_not_tradable_orders_sum": "shadow_broker_exit_not_tradable_orders_sum",
+        "broker_tradability_block_orders_sum": "shadow_broker_tradability_block_orders_sum",
         "dominant_industry": "shadow_dominant_industry",
     }
     keep = ["profile"] + [c for c in rename_map if c in df.columns]
@@ -394,6 +546,242 @@ def _load_shadow_diagnosis(path: Path | None, profiles: list[str]) -> pd.DataFra
         if c not in {"profile", "shadow_dominant_industry"}:
             out[c] = pd.to_numeric(out[c], errors="coerce")
     return out.reset_index(drop=True)
+
+
+def _load_halt_cluster_attribution(path: Path | None, profiles: list[str]) -> pd.DataFrame:
+    if not path or not path.exists():
+        return pd.DataFrame(columns=["profile"])
+    df = pd.read_csv(path)
+    if df.empty or "profile" not in df.columns or "attribution_label" not in df.columns:
+        return pd.DataFrame(columns=["profile"])
+    df = df[df["profile"].astype(str).isin(profiles)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["profile"])
+    for c in [
+        "broker_entry_not_tradable_orders",
+        "broker_exit_not_tradable_orders",
+        "blocked_sell_current_weight",
+        "blocked_target_weight",
+        "risk_adv_hit",
+        "risk_style_hit",
+        "risk_entry_not_tradable_hit",
+        "blocked_sell_reserve_entry_orders",
+        "blocked_sell_high_entry_risk_orders",
+        "blocked_sell_low_entry_safety_orders",
+    ]:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    day_cols = [c for c in ["profile", "signal_date", "trade_date", "attribution_label"] if c in df.columns]
+    if day_cols:
+        df = df.drop_duplicates(day_cols).copy()
+    rows: list[dict[str, object]] = []
+    for profile, g in df.groupby("profile"):
+        glabels = g["attribution_label"].astype(str)
+        severe_sell_mask = glabels.eq("sell_trap") & (
+            (pd.to_numeric(g["broker_exit_not_tradable_orders"], errors="coerce").fillna(0.0) > 10.0)
+            | (pd.to_numeric(g["blocked_sell_current_weight"], errors="coerce").fillna(0.0) > 0.10)
+        )
+        rows.append(
+            {
+                "profile": str(profile),
+                "halt_cluster_rows": int(len(g)),
+                "halt_cluster_sell_trap_days": int(glabels.eq("sell_trap").sum()),
+                "halt_cluster_severe_sell_trap_days": int(severe_sell_mask.sum()),
+                "halt_cluster_adv_capacity_days": int(glabels.eq("adv_capacity_collapse").sum()),
+                "halt_cluster_style_gate_days": int(glabels.eq("style_gate_collapse").sum()),
+                "halt_cluster_tradability_days": int(glabels.eq("tradability_collapse").sum()),
+                "halt_cluster_universe_empty_days": int(glabels.eq("universe_filter_empty").sum()),
+                "halt_cluster_empty_raw_days": int(glabels.eq("empty_signal_raw").sum()),
+                "halt_cluster_mixed_days": int(glabels.eq("mixed_or_other").sum()),
+                "halt_cluster_broker_exit_orders_sum": float(
+                    pd.to_numeric(g["broker_exit_not_tradable_orders"], errors="coerce").fillna(0.0).sum()
+                ),
+                "halt_cluster_broker_entry_orders_sum": float(
+                    pd.to_numeric(g["broker_entry_not_tradable_orders"], errors="coerce").fillna(0.0).sum()
+                ),
+                "halt_cluster_blocked_sell_weight_max": float(
+                    pd.to_numeric(g["blocked_sell_current_weight"], errors="coerce").fillna(0.0).max()
+                ),
+                "halt_cluster_blocked_target_weight_sum": float(
+                    pd.to_numeric(g["blocked_target_weight"], errors="coerce").fillna(0.0).sum()
+                ),
+                "halt_cluster_reserve_sell_trap_orders_sum": float(
+                    pd.to_numeric(g["blocked_sell_reserve_entry_orders"], errors="coerce").fillna(0.0).sum()
+                ),
+                "halt_cluster_reserve_sell_trap_days": int(
+                    (glabels.eq("sell_trap") & (pd.to_numeric(g["blocked_sell_reserve_entry_orders"], errors="coerce").fillna(0.0) > 0)).sum()
+                ),
+                "halt_cluster_high_entry_risk_sell_orders_sum": float(
+                    pd.to_numeric(g["blocked_sell_high_entry_risk_orders"], errors="coerce").fillna(0.0).sum()
+                ),
+                "halt_cluster_low_entry_safety_sell_orders_sum": float(
+                    pd.to_numeric(g["blocked_sell_low_entry_safety_orders"], errors="coerce").fillna(0.0).sum()
+                ),
+            }
+        )
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _detect_profile_from_score_artifact(label: str, path: Path, profiles: list[str]) -> str:
+    text = f"{label} {path.name}"
+    for profile in sorted(profiles, key=len, reverse=True):
+        if str(label) == str(profile) or str(profile) in text:
+            return str(profile)
+    return ""
+
+
+def _best_score_alpha_eval(evaluated: list[object]) -> dict[str, object]:
+    rows = [x for x in evaluated if isinstance(x, dict)]
+    if not rows:
+        return {}
+
+    def _key(row: dict[str, object]) -> tuple[int, float, float, float]:
+        return (
+            1 if bool(row.get("pass", False)) else 0,
+            _safe_float(row.get("top_minus_all_pct", float("-inf")), float("-inf")),
+            _safe_float(row.get("top_minus_bottom_pct", float("-inf")), float("-inf")),
+            _safe_float(row.get("rank_ic_mean", float("-inf")), float("-inf")),
+        )
+
+    return dict(sorted(rows, key=_key, reverse=True)[0])
+
+
+def _load_score_alpha_diagnosis(paths: list[Path] | None, profiles: list[str]) -> pd.DataFrame:
+    """Load optional score-alpha smoke gate evidence.
+
+    The preferred input is the JSON emitted by quant_score_alpha_diagnosis.py.
+    CSV inputs are accepted for metric visibility, but they do not carry the
+    alpha_quality_gate decision and therefore do not activate the hard gate.
+    """
+
+    if not paths:
+        return pd.DataFrame(columns=["profile"])
+    rows: list[dict[str, object]] = []
+    for fp in paths:
+        if not fp.exists():
+            continue
+        suffix = fp.suffix.lower()
+        if suffix == ".json":
+            try:
+                payload = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            label = str(payload.get("artifact_label", ""))
+            profile = _detect_profile_from_score_artifact(label, fp, profiles)
+            if not profile:
+                continue
+            gate = payload.get("alpha_quality_gate", {})
+            if not isinstance(gate, dict):
+                gate = {}
+            evaluated = gate.get("evaluated", [])
+            if not isinstance(evaluated, list):
+                evaluated = []
+            best = _best_score_alpha_eval(evaluated)
+
+            def _eval_for(score_col: str) -> dict[str, object]:
+                for item in evaluated:
+                    if isinstance(item, dict) and str(item.get("score_col", "")) == score_col:
+                        return item
+                return {}
+
+            target_eval = _eval_for("target_weight")
+            rank_eval = _eval_for("portfolio_rank_score")
+            rows.append(
+                {
+                    "profile": profile,
+                    "score_alpha_evidence_available": 1,
+                    "score_alpha_gate_pass": 1 if bool(gate.get("pass", False)) else 0,
+                    "score_alpha_gate_reasons": ",".join(str(x) for x in gate.get("reasons", []) or []),
+                    "score_alpha_gate_score_cols": ",".join(str(x) for x in gate.get("gate_score_cols", []) or []),
+                    "score_alpha_gate_evaluated_count": int(len(evaluated)),
+                    "score_alpha_top_score_col": str(best.get("score_col", "")),
+                    "score_alpha_top_days": _safe_int(best.get("top_days", 0), 0),
+                    "score_alpha_top_valid_forward_rows": _safe_int(best.get("top_valid_forward_rows", 0), 0),
+                    "score_alpha_top_minus_all_pct": _safe_float(best.get("top_minus_all_pct", float("nan")), float("nan")),
+                    "score_alpha_top_minus_bottom_pct": _safe_float(
+                        best.get("top_minus_bottom_pct", float("nan")),
+                        float("nan"),
+                    ),
+                    "score_alpha_rank_ic_mean": _safe_float(best.get("rank_ic_mean", float("nan")), float("nan")),
+                    "score_alpha_target_weight_top_minus_all_pct": _safe_float(
+                        target_eval.get("top_minus_all_pct", float("nan")),
+                        float("nan"),
+                    ),
+                    "score_alpha_target_weight_rank_ic_mean": _safe_float(
+                        target_eval.get("rank_ic_mean", float("nan")),
+                        float("nan"),
+                    ),
+                    "score_alpha_portfolio_rank_score_top_minus_all_pct": _safe_float(
+                        rank_eval.get("top_minus_all_pct", float("nan")),
+                        float("nan"),
+                    ),
+                    "score_alpha_portfolio_rank_score_rank_ic_mean": _safe_float(
+                        rank_eval.get("rank_ic_mean", float("nan")),
+                        float("nan"),
+                    ),
+                    "score_alpha_artifact": str(fp),
+                }
+            )
+        elif suffix == ".csv":
+            try:
+                df = pd.read_csv(fp)
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            label = str(df["artifact_label"].dropna().astype(str).iloc[0]) if "artifact_label" in df.columns and df["artifact_label"].notna().any() else ""
+            profile = _detect_profile_from_score_artifact(label, fp, profiles)
+            if not profile:
+                continue
+            rows.append(
+                {
+                    "profile": profile,
+                    "score_alpha_evidence_available": 0,
+                    "score_alpha_gate_pass": 0,
+                    "score_alpha_gate_reasons": "json_gate_missing",
+                    "score_alpha_gate_score_cols": "",
+                    "score_alpha_gate_evaluated_count": 0,
+                    "score_alpha_top_score_col": "",
+                    "score_alpha_top_days": 0,
+                    "score_alpha_top_valid_forward_rows": 0,
+                    "score_alpha_top_minus_all_pct": float("nan"),
+                    "score_alpha_top_minus_bottom_pct": float("nan"),
+                    "score_alpha_rank_ic_mean": float("nan"),
+                    "score_alpha_target_weight_top_minus_all_pct": float("nan"),
+                    "score_alpha_target_weight_rank_ic_mean": float("nan"),
+                    "score_alpha_portfolio_rank_score_top_minus_all_pct": float("nan"),
+                    "score_alpha_portfolio_rank_score_rank_ic_mean": float("nan"),
+                    "score_alpha_artifact": str(fp),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["profile"])
+    df = pd.DataFrame(rows)
+    out_rows: list[dict[str, object]] = []
+    for profile, g in df.groupby("profile", dropna=False):
+        available = pd.to_numeric(g["score_alpha_evidence_available"], errors="coerce").fillna(0).astype(int)
+        gated = g[available > 0].copy()
+        source = gated if not gated.empty else g.tail(1).copy()
+        last = source.iloc[-1]
+        fail_reasons: list[str] = []
+        if not gated.empty:
+            for value in gated.loc[pd.to_numeric(gated["score_alpha_gate_pass"], errors="coerce").fillna(0) <= 0, "score_alpha_gate_reasons"]:
+                fail_reasons.extend([x for x in str(value).split(",") if x])
+        out = last.to_dict()
+        out["profile"] = str(profile)
+        out["score_alpha_evidence_available"] = int(available.max())
+        out["score_alpha_gate_pass"] = (
+            int(pd.to_numeric(gated["score_alpha_gate_pass"], errors="coerce").fillna(0).min())
+            if not gated.empty
+            else 0
+        )
+        if fail_reasons:
+            out["score_alpha_gate_reasons"] = ",".join(sorted(set(fail_reasons)))
+        out_rows.append(out)
+    return pd.DataFrame(out_rows).reset_index(drop=True)
 
 
 def _build_promotion_review(
@@ -421,15 +809,76 @@ def _build_promotion_review(
         "p2_target_weight_sum_60",
         "p2_target_weight_sum_90",
         "p2_target_weight_sum_120",
+        "p2_signal_calendar_shortfall_days_total",
+        "p2_signal_calendar_shortfall_days_max",
+        "p2_signal_calendar_coverage_min_pct",
+        "p2_upstream_target_weight_overrun_max",
+        "p2_upstream_target_weight_underuse_max",
         "p2_target_weight_source_external_rate_pct",
         "p2_target_weight_checksum_coverage_pct",
         "p2_entry_not_tradable_orders_sum",
         "p2_exit_not_tradable_orders_sum",
+        "p2_broker_entry_not_tradable_orders_sum",
+        "p2_broker_exit_not_tradable_orders_sum",
+        "p2_broker_tradability_block_orders_sum",
         "p2_blocked_target_weight_sum",
         "p2_max_daily_tradability_blocked_orders",
+        "p2_empty_signal_days_total",
+        "p2_empty_signal_rate_mean_pct",
+        "p2_empty_signal_raw_days_total",
+        "p2_empty_after_universe_filter_days_total",
+        "p2_empty_signal_raw_rows_sum",
+        "p2_empty_signal_filtered_bj9_rows_sum",
+        "p2_empty_signal_filtered_st_rows_sum",
+        "p2_executable_pool_halt_days_total",
+        "p2_executable_pool_halt_rate_mean_pct",
+        "p2_executable_pool_halt_days_max",
+        "p2_executable_pool_halt_adv_hit_sum",
+        "p2_executable_pool_halt_entry_not_tradable_hit_sum",
+        "p2_executable_pool_halt_style_hit_sum",
+        "halt_cluster_rows",
+        "halt_cluster_sell_trap_days",
+        "halt_cluster_severe_sell_trap_days",
+        "halt_cluster_adv_capacity_days",
+        "halt_cluster_style_gate_days",
+        "halt_cluster_tradability_days",
+        "halt_cluster_universe_empty_days",
+        "halt_cluster_empty_raw_days",
+        "halt_cluster_mixed_days",
+        "halt_cluster_broker_exit_orders_sum",
+        "halt_cluster_broker_entry_orders_sum",
+        "halt_cluster_blocked_sell_weight_max",
+        "halt_cluster_blocked_target_weight_sum",
+        "halt_cluster_reserve_sell_trap_orders_sum",
+        "halt_cluster_reserve_sell_trap_days",
+        "halt_cluster_high_entry_risk_sell_orders_sum",
+        "halt_cluster_low_entry_safety_sell_orders_sum",
+        "score_alpha_evidence_available",
+        "score_alpha_gate_pass",
+        "score_alpha_gate_evaluated_count",
+        "score_alpha_top_days",
+        "score_alpha_top_valid_forward_rows",
+        "score_alpha_top_minus_all_pct",
+        "score_alpha_top_minus_bottom_pct",
+        "score_alpha_rank_ic_mean",
+        "score_alpha_target_weight_top_minus_all_pct",
+        "score_alpha_target_weight_rank_ic_mean",
+        "score_alpha_portfolio_rank_score_top_minus_all_pct",
+        "score_alpha_portfolio_rank_score_rank_ic_mean",
     ]:
         if c not in df.columns:
-            df[c] = float("nan") if c.startswith("p2_target_weight_sum") else 0.0
+            if c == "p2_signal_calendar_coverage_min_pct":
+                df[c] = 100.0
+            else:
+                df[c] = float("nan") if c.startswith("p2_target_weight_sum") else 0.0
+    for c in [
+        "score_alpha_gate_reasons",
+        "score_alpha_gate_score_cols",
+        "score_alpha_top_score_col",
+        "score_alpha_artifact",
+    ]:
+        if c not in df.columns:
+            df[c] = ""
     shadow_numeric_cols = [
         "shadow_window_count",
         "shadow_executed_days_total",
@@ -449,6 +898,19 @@ def _build_promotion_review(
         "shadow_worst_top_industry_nav_weight_pct",
         "shadow_mean_industry_nav_hhi",
         "shadow_worst_industry_nav_hhi",
+        "shadow_executable_pool_halt_days_total",
+        "shadow_executable_pool_halt_rate_mean_pct",
+        "shadow_executable_pool_halt_adv_hit_sum",
+        "shadow_executable_pool_halt_entry_not_tradable_hit_sum",
+        "shadow_executable_pool_halt_style_hit_sum",
+        "shadow_empty_signal_days_total",
+        "shadow_empty_signal_rate_mean_pct",
+        "shadow_empty_signal_raw_days_total",
+        "shadow_empty_after_universe_filter_days_total",
+        "shadow_empty_signal_filtered_bj9_rows_sum",
+        "shadow_broker_entry_not_tradable_orders_sum",
+        "shadow_broker_exit_not_tradable_orders_sum",
+        "shadow_broker_tradability_block_orders_sum",
     ]
     for c in shadow_numeric_cols:
         if c not in df.columns:
@@ -502,10 +964,39 @@ def _build_promotion_review(
         else float("nan")
     )
     main_shadow_days = _safe_float(main_row["shadow_executed_days_total"].iloc[0], float("nan")) if not main_row.empty else float("nan")
-    main_tradability_blocked_orders = (
-        _safe_float(main_row["p2_entry_not_tradable_orders_sum"].iloc[0], 0.0)
-        + _safe_float(main_row["p2_exit_not_tradable_orders_sum"].iloc[0], 0.0)
-        if not main_row.empty
+    main_tradability_blocked_orders = 0.0
+    if not main_row.empty:
+        main_tradability_blocked_orders = _safe_float(
+            main_row.get("p2_broker_tradability_block_orders_sum", pd.Series([float("nan")])).iloc[0],
+            float("nan"),
+        )
+        if pd.isna(main_tradability_blocked_orders):
+            main_tradability_blocked_orders = _safe_float(main_row["p2_entry_not_tradable_orders_sum"].iloc[0], 0.0) + _safe_float(
+                main_row["p2_exit_not_tradable_orders_sum"].iloc[0], 0.0
+            )
+    main_empty_signal_rate = (
+        _safe_float(main_row["p2_empty_signal_rate_mean_pct"].iloc[0], 0.0)
+        if not main_row.empty and "p2_empty_signal_rate_mean_pct" in main_row.columns
+        else 0.0
+    )
+    main_halt_sell_trap_days = (
+        _safe_float(main_row["halt_cluster_sell_trap_days"].iloc[0], 0.0)
+        if not main_row.empty and "halt_cluster_sell_trap_days" in main_row.columns
+        else 0.0
+    )
+    main_halt_reserve_sell_orders = (
+        _safe_float(main_row["halt_cluster_reserve_sell_trap_orders_sum"].iloc[0], 0.0)
+        if not main_row.empty and "halt_cluster_reserve_sell_trap_orders_sum" in main_row.columns
+        else 0.0
+    )
+    main_halt_tradability_days = (
+        _safe_float(main_row["halt_cluster_tradability_days"].iloc[0], 0.0)
+        if not main_row.empty and "halt_cluster_tradability_days" in main_row.columns
+        else 0.0
+    )
+    main_halt_adv_days = (
+        _safe_float(main_row["halt_cluster_adv_capacity_days"].iloc[0], 0.0)
+        if not main_row.empty and "halt_cluster_adv_capacity_days" in main_row.columns
         else 0.0
     )
 
@@ -519,6 +1010,8 @@ def _build_promotion_review(
         reasons: list[str] = []
         if int(_safe_float(row.get("p2_min_days_gate", 0.0))) <= 0:
             reasons.append("p2_executed_days_insufficient")
+        if _safe_float(row.get("p2_signal_calendar_shortfall_days_max", 0.0), 0.0) > 0.0:
+            reasons.append("p2_signal_calendar_shortfall")
         if _safe_float(row.get("ops_score", 0.0)) < main_ops_score:
             reasons.append("ops_score_below_main")
         if _safe_float(row.get("p2_objective_mean", 0.0)) < main_p2_objective:
@@ -542,14 +1035,51 @@ def _build_promotion_review(
             reasons.append("target_weight_source_not_external")
         if _safe_float(row.get("p2_target_weight_checksum_coverage_pct", 0.0), 0.0) < 100.0 - 1e-12:
             reasons.append("target_weight_checksum_missing")
-        tradability_blocked_orders = _safe_float(row.get("p2_entry_not_tradable_orders_sum", 0.0), 0.0) + _safe_float(
-            row.get("p2_exit_not_tradable_orders_sum", 0.0),
-            0.0,
-        )
+        if _safe_float(row.get("p2_upstream_target_weight_overrun_max", 0.0), 0.0) > 1e-6:
+            reasons.append("upstream_target_weight_overrun")
+        if _safe_float(row.get("score_alpha_evidence_available", 0.0), 0.0) > 0.0 and _safe_int(
+            row.get("score_alpha_gate_pass", 0),
+            0,
+        ) <= 0:
+            reasons.append("score_alpha_gate_failed")
+        empty_rate = _safe_float(row.get("p2_empty_signal_rate_mean_pct", 0.0), 0.0)
+        if empty_rate > MAX_EMPTY_SIGNAL_RATE_PCT + 1e-12:
+            reasons.append("empty_signal_rate_hard_cap_failed")
+        if empty_rate > main_empty_signal_rate + MAX_EMPTY_SIGNAL_RELATIVE_WORSE_PCT + 1e-12:
+            reasons.append("empty_signal_rate_worse_than_main")
+        tradability_blocked_orders = _safe_float(row.get("p2_broker_tradability_block_orders_sum", float("nan")), float("nan"))
+        if pd.isna(tradability_blocked_orders):
+            tradability_blocked_orders = _safe_float(row.get("p2_entry_not_tradable_orders_sum", 0.0), 0.0) + _safe_float(
+                row.get("p2_exit_not_tradable_orders_sum", 0.0),
+                0.0,
+            )
         if main_tradability_blocked_orders > 0 and tradability_blocked_orders > main_tradability_blocked_orders + 1e-12:
             reasons.append("tradability_blocked_orders_worse_than_main")
         if _safe_float(row.get("p2_max_daily_tradability_blocked_orders", 0.0), 0.0) > 10.0 + 1e-12:
             reasons.append("tradability_block_cluster_hard_cap_failed")
+        sell_trap_days = _safe_float(row.get("halt_cluster_sell_trap_days", 0.0), 0.0)
+        severe_sell_trap_days = _safe_float(row.get("halt_cluster_severe_sell_trap_days", 0.0), 0.0)
+        if sell_trap_days > max(MAX_SELL_TRAP_CLUSTER_DAYS, main_halt_sell_trap_days) + 1e-12:
+            reasons.append("halt_cluster_sell_trap_worse_than_main")
+        if severe_sell_trap_days > MAX_SELL_TRAP_CLUSTER_DAYS + 1e-12:
+            reasons.append("halt_cluster_severe_sell_trap_failed")
+        reserve_sell_orders = _safe_float(row.get("halt_cluster_reserve_sell_trap_orders_sum", 0.0), 0.0)
+        if reserve_sell_orders > main_halt_reserve_sell_orders + 1e-12:
+            reasons.append("halt_cluster_reserve_sell_trap_worse_than_main")
+        if reserve_sell_orders > MAX_RESERVE_SELL_TRAP_ORDERS + 1e-12 and sell_trap_days > 0:
+            reasons.append("halt_cluster_reserve_sell_trap_failed")
+        tradability_cluster_days = _safe_float(row.get("halt_cluster_tradability_days", 0.0), 0.0)
+        if tradability_cluster_days > max(MAX_TRADABILITY_CLUSTER_DAYS, main_halt_tradability_days + 1.0) + 1e-12:
+            reasons.append("halt_cluster_tradability_failed")
+        adv_cluster_days = _safe_float(row.get("halt_cluster_adv_capacity_days", 0.0), 0.0)
+        if adv_cluster_days > max(MAX_ADV_CLUSTER_DAYS, main_halt_adv_days + 1.0) + 1e-12:
+            reasons.append("halt_cluster_adv_capacity_failed")
+        halt_rate = _safe_float(row.get("p2_executable_pool_halt_rate_mean_pct", 0.0), 0.0)
+        halt_days_max = _safe_float(row.get("p2_executable_pool_halt_days_max", 0.0), 0.0)
+        if halt_rate > MAX_EXECUTABLE_POOL_HALT_RATE_PCT + 1e-12:
+            reasons.append("executable_pool_halt_rate_hard_cap_failed")
+        if halt_days_max > MAX_EXECUTABLE_POOL_HALT_DAYS + 1e-12:
+            reasons.append("executable_pool_halt_days_hard_cap_failed")
         if int(_safe_float(row.get("shadow_evidence_available", 0.0))) > 0:
             shadow_days = _safe_float(row.get("shadow_executed_days_total", float("nan")), float("nan"))
             if pd.notna(shadow_days) and pd.notna(main_shadow_days) and shadow_days < min(20.0, main_shadow_days):
@@ -755,14 +1285,94 @@ def _build_promotion_decision(
             "winner_p2_target_weight_checksum_coverage_pct": _safe_float(
                 top.get("p2_target_weight_checksum_coverage_pct", 0.0)
             ),
+            "winner_p2_upstream_target_weight_overrun_max": _safe_float(
+                top.get("p2_upstream_target_weight_overrun_max", 0.0)
+            ),
+            "winner_p2_upstream_target_weight_underuse_max": _safe_float(
+                top.get("p2_upstream_target_weight_underuse_max", 0.0)
+            ),
+            "winner_score_alpha_evidence_available": bool(
+                _safe_float(top.get("score_alpha_evidence_available", 0.0), 0.0) > 0.0
+            ),
+            "winner_score_alpha_gate_pass": bool(_safe_int(top.get("score_alpha_gate_pass", 0), 0)),
+            "winner_score_alpha_gate_reasons": str(top.get("score_alpha_gate_reasons", "")),
+            "winner_score_alpha_gate_score_cols": str(top.get("score_alpha_gate_score_cols", "")),
+            "winner_score_alpha_top_score_col": str(top.get("score_alpha_top_score_col", "")),
+            "winner_score_alpha_top_minus_all_pct": _safe_float(
+                top.get("score_alpha_top_minus_all_pct", 0.0),
+                0.0,
+            ),
+            "winner_score_alpha_top_minus_bottom_pct": _safe_float(
+                top.get("score_alpha_top_minus_bottom_pct", 0.0),
+                0.0,
+            ),
+            "winner_score_alpha_rank_ic_mean": _safe_float(top.get("score_alpha_rank_ic_mean", 0.0), 0.0),
+            "winner_score_alpha_artifact": str(top.get("score_alpha_artifact", "")),
             "winner_p2_entry_not_tradable_orders_sum": _safe_float(top.get("p2_entry_not_tradable_orders_sum", 0.0)),
             "winner_p2_exit_not_tradable_orders_sum": _safe_float(top.get("p2_exit_not_tradable_orders_sum", 0.0)),
+            "winner_p2_broker_entry_not_tradable_orders_sum": _safe_float(
+                top.get("p2_broker_entry_not_tradable_orders_sum", top.get("p2_entry_not_tradable_orders_sum", 0.0))
+            ),
+            "winner_p2_broker_exit_not_tradable_orders_sum": _safe_float(
+                top.get("p2_broker_exit_not_tradable_orders_sum", top.get("p2_exit_not_tradable_orders_sum", 0.0))
+            ),
+            "winner_p2_broker_tradability_block_orders_sum": _safe_float(
+                top.get("p2_broker_tradability_block_orders_sum", 0.0)
+            ),
             "winner_p2_blocked_target_weight_sum": _safe_float(top.get("p2_blocked_target_weight_sum", 0.0)),
             "winner_p2_max_daily_tradability_blocked_orders": _safe_float(
                 top.get("p2_max_daily_tradability_blocked_orders", 0.0)
             ),
+            "winner_p2_empty_signal_days_total": _safe_float(top.get("p2_empty_signal_days_total", 0.0)),
+            "winner_p2_empty_signal_rate_mean_pct": _safe_float(top.get("p2_empty_signal_rate_mean_pct", 0.0)),
+            "winner_p2_empty_signal_raw_days_total": _safe_float(top.get("p2_empty_signal_raw_days_total", 0.0)),
+            "winner_p2_empty_after_universe_filter_days_total": _safe_float(
+                top.get("p2_empty_after_universe_filter_days_total", 0.0)
+            ),
+            "winner_p2_empty_signal_filtered_bj9_rows_sum": _safe_float(
+                top.get("p2_empty_signal_filtered_bj9_rows_sum", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_days_total": _safe_float(
+                top.get("p2_executable_pool_halt_days_total", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_rate_mean_pct": _safe_float(
+                top.get("p2_executable_pool_halt_rate_mean_pct", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_days_max": _safe_float(
+                top.get("p2_executable_pool_halt_days_max", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_adv_hit_sum": _safe_float(
+                top.get("p2_executable_pool_halt_adv_hit_sum", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_entry_not_tradable_hit_sum": _safe_float(
+                top.get("p2_executable_pool_halt_entry_not_tradable_hit_sum", 0.0)
+            ),
+            "winner_p2_executable_pool_halt_style_hit_sum": _safe_float(
+                top.get("p2_executable_pool_halt_style_hit_sum", 0.0)
+            ),
             "winner_p2_nav_not_below_main_windows": _safe_int(top.get("p2_nav_not_below_main_windows", 0)),
             "winner_p2_mdd_not_worse_than_main_windows": _safe_int(top.get("p2_mdd_not_worse_than_main_windows", 0)),
+            "winner_halt_cluster_rows": _safe_int(top.get("halt_cluster_rows", 0)),
+            "winner_halt_cluster_sell_trap_days": _safe_int(top.get("halt_cluster_sell_trap_days", 0)),
+            "winner_halt_cluster_severe_sell_trap_days": _safe_int(
+                top.get("halt_cluster_severe_sell_trap_days", 0)
+            ),
+            "winner_halt_cluster_adv_capacity_days": _safe_int(top.get("halt_cluster_adv_capacity_days", 0)),
+            "winner_halt_cluster_style_gate_days": _safe_int(top.get("halt_cluster_style_gate_days", 0)),
+            "winner_halt_cluster_tradability_days": _safe_int(top.get("halt_cluster_tradability_days", 0)),
+            "winner_halt_cluster_universe_empty_days": _safe_int(top.get("halt_cluster_universe_empty_days", 0)),
+            "winner_halt_cluster_broker_exit_orders_sum": _safe_float(
+                top.get("halt_cluster_broker_exit_orders_sum", 0.0)
+            ),
+            "winner_halt_cluster_blocked_sell_weight_max": _safe_float(
+                top.get("halt_cluster_blocked_sell_weight_max", 0.0)
+            ),
+            "winner_halt_cluster_reserve_sell_trap_orders_sum": _safe_float(
+                top.get("halt_cluster_reserve_sell_trap_orders_sum", 0.0)
+            ),
+            "winner_halt_cluster_reserve_sell_trap_days": _safe_int(
+                top.get("halt_cluster_reserve_sell_trap_days", 0)
+            ),
             "winner_shadow_mean_industry_hhi": _safe_float(top.get("shadow_mean_industry_hhi", 0.0)),
             "main_profile_score": float(main_score),
             "main_ops_score": float(main_ops_score),
@@ -803,6 +1413,18 @@ def main() -> int:
         help="可选 P2 shadow diagnosis 文件，用于 ADV/行业集中硬门槛",
     )
     p.add_argument(
+        "--halt-attribution",
+        type=str,
+        default=str(BACKTEST_DIR / "quant_p2_halt_cluster_attribution_latest.csv"),
+        help="可选 P2 halt cluster attribution 文件，用于 sell-trap/cluster 硬门槛",
+    )
+    p.add_argument(
+        "--score-alpha-diagnosis",
+        type=str,
+        default="",
+        help="可选 score-alpha diagnosis JSON/CSV，逗号分隔；JSON gate 失败时候选档不得升档",
+    )
+    p.add_argument(
         "--ledger-glob",
         type=str,
         default="*paper_replay_*ledger.csv",
@@ -834,6 +1456,13 @@ def main() -> int:
     shadow_df = _load_shadow_diagnosis(Path(args.shadow_diagnosis).resolve() if args.shadow_diagnosis else None, profiles)
     if not shadow_df.empty and len(shadow_df.columns) > 1:
         p2_df = p2_df.merge(shadow_df, on="profile", how="left")
+    halt_df = _load_halt_cluster_attribution(Path(args.halt_attribution).resolve() if args.halt_attribution else None, profiles)
+    if not halt_df.empty and len(halt_df.columns) > 1:
+        p2_df = p2_df.merge(halt_df, on="profile", how="left")
+    score_alpha_files = [Path(x.strip()).resolve() for x in str(args.score_alpha_diagnosis).split(",") if x.strip()]
+    score_alpha_df = _load_score_alpha_diagnosis(score_alpha_files, profiles)
+    if not score_alpha_df.empty and len(score_alpha_df.columns) > 1:
+        p2_df = p2_df.merge(score_alpha_df, on="profile", how="left")
     review_df = _build_promotion_review(research_df, p2_df, main_profile=main_profile)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     review_id = f"quant_profile_promotion_review_{ts}"
@@ -848,6 +1477,8 @@ def main() -> int:
         "rolling_summary": str(Path(args.rolling_summary).resolve()),
         "p2_summary": [str(x) for x in p2_summary_file] if isinstance(p2_summary_file, list) else (str(p2_summary_file) if p2_summary_file else ""),
         "shadow_diagnosis": str(Path(args.shadow_diagnosis).resolve()) if args.shadow_diagnosis else "",
+        "halt_attribution": str(Path(args.halt_attribution).resolve()) if args.halt_attribution else "",
+        "score_alpha_diagnosis": [str(x) for x in score_alpha_files],
         "ledger_glob": str(args.ledger_glob),
         "matched_ledgers": [str(x) for x in ledgers],
         "min_p2_executed_days": int(args.min_p2_executed_days),

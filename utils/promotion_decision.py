@@ -95,6 +95,8 @@ def _validate_with_builtin_rules(payload: dict[str, object]) -> None:
         "candidate_p2_executed_days_total",
         "min_p2_executed_days",
         "candidate_p2_gate_passed",
+        "candidate_promotion_hard_gate_passed",
+        "candidate_execution_parity_passed",
     ]:
         if key not in evidence:
             raise ValueError(f"evidence 缺少字段: {key}")

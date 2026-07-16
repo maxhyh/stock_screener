@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from core.platform import load_experiment_registry, load_latest_run_manifest
+from core.data import AShareMarketDataGateway
 
 _OVERVIEW_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _OPS_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -869,7 +870,12 @@ def _normalize_stock_code(raw) -> str:
     return s.zfill(6)
 
 
-def _build_stock_name_map(meta_file: str, daily_df: pd.DataFrame | None = None, scan_df: pd.DataFrame | None = None) -> dict[str, str]:
+def _build_stock_name_map(
+    data_root: str | None,
+    asof_date: object,
+    daily_df: pd.DataFrame | None = None,
+    scan_df: pd.DataFrame | None = None,
+) -> dict[str, str]:
     code_to_name: dict[str, str] = {}
 
     def add_from_df(df: pd.DataFrame | None):
@@ -888,28 +894,21 @@ def _build_stock_name_map(meta_file: str, daily_df: pd.DataFrame | None = None, 
     add_from_df(daily_df)
     add_from_df(scan_df)
 
-    if os.path.exists(meta_file):
-        try:
-            mdf = pd.read_csv(meta_file, dtype=str)
-            if {"ts_code", "name"}.issubset(mdf.columns):
-                for ts_code, name in mdf[["ts_code", "name"]].itertuples(index=False, name=None):
-                    c = _normalize_stock_code(ts_code)
-                    n = str(name or "").strip()
-                    if c and n and n.lower() != "nan" and c not in code_to_name:
-                        code_to_name[c] = n
-            elif {"代码", "名称"}.issubset(mdf.columns):
-                for code, name in mdf[["代码", "名称"]].itertuples(index=False, name=None):
-                    c = _normalize_stock_code(code)
-                    n = str(name or "").strip()
-                    if c and n and n.lower() != "nan" and c not in code_to_name:
-                        code_to_name[c] = n
-        except Exception:
-            pass
+    try:
+        mdf = AShareMarketDataGateway(data_root or None).load_stock_info(asof_date)
+        if {"ts_code", "name"}.issubset(mdf.columns):
+            for ts_code, name in mdf[["ts_code", "name"]].itertuples(index=False, name=None):
+                c = _normalize_stock_code(ts_code)
+                n = str(name or "").strip()
+                if c and n and n.lower() != "nan" and c not in code_to_name:
+                    code_to_name[c] = n
+    except Exception:
+        pass
 
     return code_to_name
 
 
-def _build_returns_drilldown(trades_df: pd.DataFrame, parquet_file: str) -> dict[str, list[dict[str, Any]]]:
+def _build_returns_drilldown(trades_df: pd.DataFrame, data_root: str | None) -> dict[str, list[dict[str, Any]]]:
     if trades_df.empty or "exit_date" not in trades_df.columns or "equity" not in trades_df.columns:
         return {"annual": [], "monthly": [], "daily": []}
 
@@ -923,11 +922,13 @@ def _build_returns_drilldown(trades_df: pd.DataFrame, parquet_file: str) -> dict
     start_day = tdf["exit_date"].min().normalize()
     end_day = tdf["exit_date"].max().normalize()
 
-    if os.path.exists(parquet_file):
-        cal = pd.read_parquet(parquet_file, columns=["trade_date"])
-        cal_days = pd.to_datetime(cal["trade_date"].astype(str), errors="coerce").dropna().dt.normalize().drop_duplicates()
-        cal_days = cal_days[(cal_days >= start_day) & (cal_days <= end_day)].sort_values()
-    else:
+    try:
+        sessions = AShareMarketDataGateway(data_root or None).available_trade_dates(
+            start=start_day,
+            end=end_day,
+        )
+        cal_days = pd.to_datetime(pd.Series(sessions), errors="coerce").dropna().dt.normalize().sort_values()
+    except Exception:
         cal_days = pd.date_range(start_day, end_day, freq="B")
     if len(cal_days) == 0:
         return {"annual": [], "monthly": [], "daily": []}
@@ -975,8 +976,7 @@ def _build_returns_drilldown(trades_df: pd.DataFrame, parquet_file: str) -> dict
 
 def load_platform_overview(cfg: dict[str, Any], date_q: str | None = None) -> dict[str, Any]:
     output_dir = cfg["OUTPUT_DIR"]
-    parquet_file = cfg["PARQUET_FILE"]
-    meta_file = cfg["META_FILE"]
+    data_root = cfg.get("ASHARE_DATA_ROOT") or None
 
     ymd = None
     if date_q:
@@ -1006,7 +1006,7 @@ def load_platform_overview(cfg: dict[str, Any], date_q: str | None = None) -> di
     cache_key = (
         date_q or "",
         os.environ.get("MFTS_WEB_FULL_COVERAGE", "0"),
-        _existing_signature([daily_file, scan_file or "", verify_file or "", history_file or "", backtest_file or "", opt_file or "", latest_trades_file or "", meta_file]),
+        _existing_signature([daily_file, scan_file or "", verify_file or "", history_file or "", backtest_file or "", opt_file or "", latest_trades_file or ""]),
     )
     cached = _OVERVIEW_CACHE.get(cache_key)
     if cached is not None:
@@ -1028,7 +1028,7 @@ def load_platform_overview(cfg: dict[str, Any], date_q: str | None = None) -> di
         if "代码" in scan_df.columns:
             scan_df["代码"] = scan_df["代码"].apply(_normalize_stock_code)
 
-    name_map = _build_stock_name_map(meta_file, daily_df=daily_df, scan_df=scan_df)
+    name_map = _build_stock_name_map(data_root, date_display, daily_df=daily_df, scan_df=scan_df)
     for df in [daily_df, scan_df]:
         if not df.empty and "代码" in df.columns:
             if "名称" not in df.columns:
@@ -1113,7 +1113,7 @@ def load_platform_overview(cfg: dict[str, Any], date_q: str | None = None) -> di
                 "positions",
             ]
         ].to_dict("records")
-        returns_drilldown = _build_returns_drilldown(tdf, parquet_file)
+        returns_drilldown = _build_returns_drilldown(tdf, data_root)
 
     optimize_top: list[dict[str, Any]] = []
     if opt_file and os.path.exists(opt_file):
@@ -1135,12 +1135,11 @@ def load_platform_overview(cfg: dict[str, Any], date_q: str | None = None) -> di
             optimize_top = odf[[col for col in keep_cols if col in odf.columns]].head(5).to_dict("records")
 
     coverage = int(len(daily_df))
-    if os.environ.get("MFTS_WEB_FULL_COVERAGE", "0") == "1" and os.path.exists(parquet_file):
+    if os.environ.get("MFTS_WEB_FULL_COVERAGE", "0") == "1":
         try:
-            cdf = pd.read_parquet(parquet_file, columns=["trade_date", "ts_code"])
-            cdf["trade_date"] = pd.to_datetime(cdf["trade_date"].astype(str), errors="coerce").dt.strftime("%Y%m%d")
-            day_df = cdf[cdf["trade_date"] == date_token]
-            coverage = int(day_df["ts_code"].astype(str).str.split(".").str[0].nunique())
+            day = f"{date_token[:4]}-{date_token[4:6]}-{date_token[6:8]}"
+            cdf = AShareMarketDataGateway(data_root).load_bars(day, day)
+            coverage = int(cdf["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).nunique())
         except Exception:
             coverage = int(len(daily_df))
 

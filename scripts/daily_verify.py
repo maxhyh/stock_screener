@@ -20,18 +20,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import resolve_default_label_horizon
 from utils.code_utils import normalize_ts_code_series
 from utils.output_paths import ensure_output_dirs, resolve_file, write_dual_csv
+from core.data import AShareMarketDataGateway
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DEFAULT_VERIFY_LABEL_MODE = os.environ.get('MFTS_VERIFY_LABEL_MODE', 'open_to_open')
 DEFAULT_VERIFY_LABEL_HORIZON = int(os.environ.get('MFTS_VERIFY_LABEL_HORIZON', str(resolve_default_label_horizon(fallback=8))))
 
 
-def load_market_day_data():
-    """加载市场日线数据（仅验证所需列）。"""
-    parquet_file = os.path.join(DATA_DIR, "daily_all_5y.parquet")
-    df = pd.read_parquet(parquet_file, columns=['ts_code', 'trade_date', 'open', 'close'])
+def load_market_day_data(pred_date: object, label_horizon: int = 1):
+    """Load the bounded ODS session window needed for one verification run."""
+    df = AShareMarketDataGateway().load_bars(
+        pred_date,
+        pred_date,
+        lookback_sessions=1,
+        forward_sessions=max(2, int(label_horizon) + 1),
+    )
     df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
     df['ts_code'] = normalize_ts_code_series(df['ts_code'])
     df = df[df['ts_code'] != ''].copy()
@@ -129,7 +133,7 @@ def verify_predictions(pred_date=None, label_mode='open_to_close_t1', label_hori
     
     # 3. 获取 T+1 交易日收盘价
     print("\n加载市场数据并定位 T+1 交易日...")
-    market_df = load_market_day_data()
+    market_df = load_market_day_data(pred_date, label_horizon=label_horizon)
     entry_date = get_next_trade_date(market_df, pred_date)
     if entry_date is None:
         print("\n❌ 无法验证：推荐日之后暂无交易日数据")

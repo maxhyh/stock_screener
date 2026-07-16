@@ -17,6 +17,7 @@ This directory is the project-owned memory layer for the A-share quant platform.
 2. During work, write concrete findings to `memory/learnings.md` or `memory/errors.md`.
 3. Run `python scripts/quant_memory_evolve.py` to refresh active memory and nightly review.
 4. Promotion decisions must still come from evidence artifacts, not memory alone.
+5. Treat external expert review as an escalation mechanism. Use it when local evidence cannot resolve uncertainty, when a strategic fork needs independent scrutiny, or before a serious promotion/default-profile decision. Otherwise continue the local implementation and evidence loop.
 
 ## Learning Entry Format
 

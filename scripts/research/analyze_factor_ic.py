@@ -21,8 +21,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, os.path.join(BASE_DIR, 'core'))
 
 from mfts_screener import calc_indicators
+from core.data.market_data_gateway import AShareMarketDataGateway
 
-DATA_FILE = os.path.join(BASE_DIR, "data/daily_all_5y.parquet")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # 因子定义
@@ -111,9 +111,18 @@ def main():
     print("=" * 70)
     
     # 【关键】只加载原始数据，不计算指标
-    print("\n加载原始数据...")
+    print("\n从共享只读 ODS 加载原始数据...")
     columns_needed = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount', 'pct_chg']
-    df = pd.read_parquet(DATA_FILE, columns=columns_needed)
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates(start=START_DATE, end=END_DATE)
+    if not sessions:
+        raise RuntimeError("共享 ODS 没有因子 IC 分析所需的日线会话")
+    # 指标计算需要长历史，数据窗口从训练开始向前展开 252 个交易日。
+    df = gateway.load_bars(START_DATE, END_DATE, include_bj9=False, lookback_sessions=252)
+    missing_columns = [column for column in columns_needed if column not in df.columns]
+    if missing_columns:
+        raise RuntimeError(f"共享 ODS 缺少因子 IC 所需字段: {missing_columns}")
+    df = df[columns_needed].copy()
     df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
     df['ts_code'] = df['ts_code'].astype(str)
     

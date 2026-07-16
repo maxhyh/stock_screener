@@ -27,11 +27,11 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR))
 
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series
+from core.data import AShareMarketDataGateway
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 
-DATA_DIR = BASE_DIR / "data"
 BACKTEST_DIR = BASE_DIR / "output" / "backtest"
 EXEC_DIR = BASE_DIR / "output" / "execution"
-PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
 
 
 def _log(msg: str) -> None:
@@ -126,27 +126,8 @@ def _load_summary_frames(raw: str, profiles: list[str]) -> tuple[pd.DataFrame, l
     return pd.concat(frames, ignore_index=True), used_paths
 
 
-def _load_industry_map() -> dict[str, str]:
-    candidates = [DATA_DIR / "stock_info.csv", DATA_DIR / "stock_metadata.csv", DATA_DIR / "stock_basic.csv"]
-    for fp in candidates:
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype={"ts_code": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if not code_col or not ind_col:
-            continue
-        work = df[[code_col, ind_col]].copy()
-        work["code"] = normalize_ts_code_series(work[code_col])
-        work = work[work["code"] != ""].copy()
-        work["industry"] = work[ind_col].astype(str).fillna("").str.strip().replace({"nan": "", "None": ""})
-        return dict(zip(work["code"], work["industry"]))
-    return {}
+def _load_industry_map(asof_date: object) -> dict[str, str]:
+    return load_ods_industry_map(asof_date=asof_date)
 
 
 def _select_shadow_rows(summary_df: pd.DataFrame, profiles: list[str], windows: set[int] | None) -> pd.DataFrame:
@@ -175,13 +156,13 @@ def _collect_price_map(run_records: list[dict[str, Any]]) -> dict[tuple[str, str
         for code in rec.get("codes", []):
             all_dates.add(trade_date)
             all_codes.add(code)
-    if (not all_dates) or (not all_codes) or (not PARQUET_FILE.exists()):
+    if (not all_dates) or (not all_codes):
         return {}
 
     start = min(all_dates)
     end = max(all_dates)
     try:
-        bars = pd.read_parquet(PARQUET_FILE, columns=["ts_code", "trade_date", "close"])
+        bars = AShareMarketDataGateway().load_bars(start, end)
     except Exception:
         return {}
     if bars.empty:
@@ -359,6 +340,10 @@ def _profile_row(profile: str, rows: pd.DataFrame, industry_map: dict[str, str])
     mdd = pd.to_numeric(rows.get("max_drawdown_pct", 0.0), errors="coerce").fillna(0.0)
     obj = pd.to_numeric(rows.get("objective_score", 0.0), errors="coerce").fillna(0.0)
     exec_days = pd.to_numeric(rows.get("executed_days", 0.0), errors="coerce").fillna(0.0)
+    halt_days = pd.to_numeric(rows.get("executable_pool_halt_days", 0.0), errors="coerce").fillna(0.0)
+    halt_rate = pd.to_numeric(rows.get("executable_pool_halt_rate_pct", 0.0), errors="coerce").fillna(0.0)
+    empty_days = pd.to_numeric(rows.get("empty_signal_days", 0.0), errors="coerce").fillna(0.0)
+    empty_rate = pd.to_numeric(rows.get("empty_signal_rate_pct", 0.0), errors="coerce").fillna(0.0)
 
     adv_parts: list[dict[str, float]] = []
     ind_parts: list[dict[str, float]] = []
@@ -386,6 +371,54 @@ def _profile_row(profile: str, rows: pd.DataFrame, industry_map: dict[str, str])
         "max_drawdown_worst_pct": float(mdd.min()),
         "objective_score_mean": float(obj.mean()),
         "executed_days_total": float(exec_days.sum()),
+        "empty_signal_days_total": float(empty_days.sum()),
+        "empty_signal_rate_mean_pct": float(empty_rate.mean()),
+        "empty_signal_raw_days_total": float(
+            pd.to_numeric(rows.get("empty_signal_raw_days", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "empty_after_universe_filter_days_total": float(
+            pd.to_numeric(rows.get("empty_after_universe_filter_days", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "empty_signal_raw_rows_sum": float(
+            pd.to_numeric(rows.get("empty_signal_raw_rows_sum", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "empty_signal_filtered_bj9_rows_sum": float(
+            pd.to_numeric(rows.get("empty_signal_filtered_bj9_rows_sum", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "empty_signal_filtered_st_rows_sum": float(
+            pd.to_numeric(rows.get("empty_signal_filtered_st_rows_sum", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "executable_pool_halt_days_total": float(halt_days.sum()),
+        "executable_pool_halt_rate_mean_pct": float(halt_rate.mean()),
+        "executable_pool_halt_adv_hit_sum": float(
+            pd.to_numeric(rows.get("executable_pool_halt_adv_hit_sum", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "executable_pool_halt_entry_not_tradable_hit_sum": float(
+            pd.to_numeric(rows.get("executable_pool_halt_entry_not_tradable_hit_sum", 0.0), errors="coerce")
+            .fillna(0.0)
+            .sum()
+        ),
+        "executable_pool_halt_style_hit_sum": float(
+            pd.to_numeric(rows.get("executable_pool_halt_style_hit_sum", 0.0), errors="coerce").fillna(0.0).sum()
+        ),
+        "broker_entry_not_tradable_orders_sum": float(
+            pd.to_numeric(rows.get("broker_entry_not_tradable_orders", rows.get("entry_not_tradable_orders", 0.0)), errors="coerce")
+            .fillna(0.0)
+            .sum()
+        ),
+        "broker_exit_not_tradable_orders_sum": float(
+            pd.to_numeric(rows.get("broker_exit_not_tradable_orders", rows.get("exit_not_tradable_orders", 0.0)), errors="coerce")
+            .fillna(0.0)
+            .sum()
+        ),
+        "broker_tradability_block_orders_sum": float(
+            (
+                pd.to_numeric(rows.get("broker_entry_not_tradable_orders", rows.get("entry_not_tradable_orders", 0.0)), errors="coerce")
+                .fillna(0.0)
+                + pd.to_numeric(rows.get("broker_exit_not_tradable_orders", rows.get("exit_not_tradable_orders", 0.0)), errors="coerce")
+                .fillna(0.0)
+            ).sum()
+        ),
         "adv_blocked_rows_total": float(pd.to_numeric(adv_df.get("adv_blocked_rows", 0.0), errors="coerce").sum()) if not adv_df.empty else 0.0,
         "adv_block_days_total": float(pd.to_numeric(adv_df.get("adv_block_days", 0.0), errors="coerce").sum()) if not adv_df.empty else 0.0,
         "adv_participation_mean_pct": float(pd.to_numeric(adv_df.get("adv_participation_mean_pct", 0.0), errors="coerce").mean()) if not adv_df.empty else 0.0,
@@ -428,7 +461,8 @@ def main() -> int:
     windows = {int(x) for x in _parse_profiles(args.windows)} if args.windows.strip() else set()
     summary_df, summary_files = _load_summary_frames(args.p2_summary, profiles)
     selected = _select_shadow_rows(summary_df, profiles, windows)
-    industry_map = _load_industry_map()
+    latest_session = AShareMarketDataGateway().available_trade_dates()[-1]
+    industry_map = _load_industry_map(latest_session)
 
     rows: list[dict[str, Any]] = []
     for profile, g in selected.groupby("profile"):

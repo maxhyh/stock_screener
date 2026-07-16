@@ -28,6 +28,46 @@ def _safe_float(v: object, default: float = 0.0) -> float:
     return float(default)
 
 
+def _safe_int(v: object, default: int = 0) -> int:
+    try:
+        return int(_safe_float(v, float(default)))
+    except Exception:
+        return int(default)
+
+
+def _entry_lineage_from_position(pos: dict[str, object] | None) -> dict[str, object]:
+    p = pos if isinstance(pos, dict) else {}
+    return {
+        "position_entry_signal_date": str(p.get("entry_signal_date", "") or ""),
+        "position_entry_trade_date": str(p.get("entry_trade_date", "") or ""),
+        "position_entry_tradability_safe_score": _safe_float(
+            p.get("entry_tradability_safe_score", np.nan), np.nan
+        ),
+        "position_entry_risk_score": _safe_float(p.get("entry_tradability_entry_risk_score", np.nan), np.nan),
+        "position_entry_limit_headroom_pct": _safe_float(
+            p.get("entry_tradability_limit_headroom_pct", np.nan), np.nan
+        ),
+        "position_entry_exit_trap_safe_score": _safe_float(p.get("entry_exit_trap_safe_score", np.nan), np.nan),
+        "position_entry_exit_trap_risk_score": _safe_float(p.get("entry_exit_trap_risk_score", np.nan), np.nan),
+        "position_entry_exit_trap_downside_headroom_pct": _safe_float(
+            p.get("entry_exit_trap_downside_headroom_pct", np.nan), np.nan
+        ),
+        "position_entry_exit_trap_volume_drought_risk": _safe_float(
+            p.get("entry_exit_trap_volume_drought_risk", np.nan), np.nan
+        ),
+        "position_entry_exit_trap_drawdown_10d_pct": _safe_float(
+            p.get("entry_exit_trap_drawdown_10d_pct", np.nan), np.nan
+        ),
+        "position_entry_exit_trap_down_momentum_5d": _safe_float(
+            p.get("entry_exit_trap_down_momentum_5d", np.nan), np.nan
+        ),
+        "position_entry_exit_trap_volatility_10d": _safe_float(
+            p.get("entry_exit_trap_volatility_10d", np.nan), np.nan
+        ),
+        "position_entry_reserve_candidate": _safe_int(p.get("entry_reserve_candidate", 0), 0),
+    }
+
+
 def _get_bar_row(bars_idx: pd.DataFrame, trade_date: pd.Timestamp, code: str) -> pd.Series | None:
     try:
         row = bars_idx.loc[(trade_date, code)]
@@ -46,7 +86,12 @@ def _is_suspended(row: pd.Series | None) -> bool:
     op = _safe_float(row.get("open", np.nan), np.nan)
     vol = _safe_float(row.get("vol", np.nan), np.nan)
     amt = _safe_float(row.get("amount", np.nan), np.nan)
-    return (not np.isfinite(op)) or op <= 0 or (not np.isfinite(vol)) or vol <= 0 or (not np.isfinite(amt)) or amt <= 0
+    if (not np.isfinite(op)) or op <= 0:
+        return True
+    # Some refreshed A-share daily bars have missing volume while amount is
+    # present and positive. Treat positive amount as tradability evidence; a
+    # missing volume field alone must not become a fake suspension.
+    return not ((np.isfinite(amt) and amt > 0) or (np.isfinite(vol) and vol > 0))
 
 
 def _is_locked_limit_up(row: pd.Series | None, limit_ratio: float) -> bool:
@@ -251,6 +296,49 @@ class PaperBroker(BrokerAdapter):
         }
         return active, metrics
 
+    def _active_prior_blocked_sell_risk(
+        self,
+        *,
+        prior_state: dict[str, object],
+        positions: dict[str, dict[str, object]],
+        target_qty_map: dict[str, int],
+        bars_idx: pd.DataFrame,
+        trade_date: pd.Timestamp,
+        nav_pre: float,
+    ) -> dict[str, float]:
+        prior_raw = prior_state.get("blocked_order_state", {})
+        prior = prior_raw if isinstance(prior_raw, dict) else {}
+        count = 0
+        notional = 0.0
+        max_days = 0
+        for raw_key, raw_item in prior.items():
+            item = raw_item if isinstance(raw_item, dict) else {}
+            side = str(item.get("side", "") or "").upper()
+            code = normalize_ts_code(item.get("code", "") or str(raw_key).split(":")[-1])
+            if side != "SELL" or not code:
+                continue
+            cur_qty = int(_safe_float(positions.get(code, {}).get("qty", 0), 0))
+            tgt_qty = int(target_qty_map.get(code, 0))
+            unresolved_qty = max(0, cur_qty - tgt_qty)
+            if unresolved_qty <= 0:
+                continue
+            bar = _get_bar_row(bars_idx, trade_date, code)
+            px = _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan
+            if not np.isfinite(px) or px <= 0:
+                px = _safe_float(positions.get(code, {}).get("avg_cost", 0.0), 0.0)
+            if px <= 0:
+                continue
+            count += 1
+            notional += float(unresolved_qty * px)
+            max_days = max(max_days, int(_safe_float(item.get("consecutive_days", 0), 0)))
+        weight = float(notional / max(nav_pre, 1e-12)) if notional > 0 else 0.0
+        return {
+            "active_blocked_sell_state_count": float(count),
+            "active_blocked_sell_state_notional": float(notional),
+            "active_blocked_sell_state_weight": float(weight),
+            "active_blocked_sell_state_max_consecutive_days": float(max_days),
+        }
+
     def rebalance_on_state(
         self,
         *,
@@ -271,12 +359,16 @@ class PaperBroker(BrokerAdapter):
         market_value_pre, _ = _mark_to_market(positions, bars_idx, trade_date)
         nav_pre = cash + market_value_pre
 
+        has_external_target_weight = "target_weight" in signal_df.columns
         external_all = (
-            pd.to_numeric(signal_df.get("target_weight", pd.Series(dtype=float)), errors="coerce").fillna(0.0).clip(lower=0.0)
-            if "target_weight" in signal_df.columns
+            pd.to_numeric(signal_df.get("target_weight", pd.Series(dtype=float)), errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+            if has_external_target_weight
             else pd.Series(dtype=float)
         )
-        if len(external_all) == len(signal_df) and float(external_all.sum()) > 0:
+        external_target_weight_valid = bool(has_external_target_weight and len(external_all) == len(signal_df))
+        if external_target_weight_valid:
             picks = signal_df.loc[external_all > 0].copy()
         else:
             picks = signal_df.head(max(1, top_n)).copy()
@@ -288,7 +380,7 @@ class PaperBroker(BrokerAdapter):
             else np.array([], dtype=float)
         )
         target_weight_source = "score_weight_fallback"
-        if len(external_weight_raw) == len(picks) and float(np.sum(external_weight_raw)) > 0:
+        if external_target_weight_valid and len(external_weight_raw) == len(picks):
             w = external_weight_raw.copy()
             if float(np.sum(w)) > target_total_pos + 1e-12 and target_total_pos > 0:
                 w = w * (target_total_pos / float(np.sum(w)))
@@ -322,6 +414,7 @@ class PaperBroker(BrokerAdapter):
         participation_map: dict[str, float] = {}
         unfilled_weight_map: dict[str, float] = {}
         industry_weight_map: dict[str, float] = {}
+        signal_lineage_map: dict[str, dict[str, object]] = {}
         name_map: dict[str, str] = {}
         rank_map: dict[str, int] = {}
         for _, row in picks.iterrows():
@@ -347,6 +440,30 @@ class PaperBroker(BrokerAdapter):
             participation_map[code] = max(0.0, _safe_float(row.get("participation_pct", 0.0), 0.0))
             unfilled_weight_map[code] = max(0.0, _safe_float(row.get("unfilled_target_weight", 0.0), 0.0))
             industry_weight_map[code] = max(0.0, _safe_float(row.get("industry_weight_post", 0.0), 0.0))
+            signal_lineage_map[code] = {
+                "entry_signal_date": signal_date.strftime("%Y-%m-%d"),
+                "entry_tradability_safe_score": _safe_float(row.get("tradability_safe_score", np.nan), np.nan),
+                "entry_tradability_entry_risk_score": _safe_float(
+                    row.get("tradability_entry_risk_score", np.nan), np.nan
+                ),
+                "entry_tradability_limit_headroom_pct": _safe_float(
+                    row.get("tradability_limit_headroom_pct", np.nan), np.nan
+                ),
+                "entry_exit_trap_safe_score": _safe_float(row.get("exit_trap_safe_score", np.nan), np.nan),
+                "entry_exit_trap_risk_score": _safe_float(row.get("exit_trap_risk_score", np.nan), np.nan),
+                "entry_exit_trap_downside_headroom_pct": _safe_float(
+                    row.get("exit_trap_downside_headroom_pct", np.nan), np.nan
+                ),
+                "entry_exit_trap_volume_drought_risk": _safe_float(
+                    row.get("exit_trap_volume_drought_risk", np.nan), np.nan
+                ),
+                "entry_exit_trap_drawdown_10d_pct": _safe_float(row.get("exit_trap_drawdown_10d_pct", np.nan), np.nan),
+                "entry_exit_trap_down_momentum_5d": _safe_float(row.get("exit_trap_down_momentum_5d", np.nan), np.nan),
+                "entry_exit_trap_volatility_10d": _safe_float(row.get("exit_trap_volatility_10d", np.nan), np.nan),
+                "entry_reserve_candidate": _safe_int(row.get("reserve_candidate", 0), 0),
+                "entry_portfolio_rank_score": _safe_float(row.get("portfolio_rank_score", np.nan), np.nan),
+                "entry_reserve_safe_score": _safe_float(row.get("reserve_safe_score", np.nan), np.nan),
+            }
             name_map[code] = name
             rank_map[code] = rank
 
@@ -366,7 +483,9 @@ class PaperBroker(BrokerAdapter):
             if cur <= tgt:
                 continue
             qty_req = cur - tgt
-            name = name_map.get(code, str(positions.get(code, {}).get("name", code)))
+            pos = positions.get(code, {})
+            name = name_map.get(code, str(pos.get("name", code)))
+            lineage = _entry_lineage_from_position(pos)
             bar = _get_bar_row(bars_idx, trade_date, code)
             if not _can_exit(bar, code, name):
                 open_px = _safe_float(bar.get("open", np.nan), np.nan) if bar is not None else np.nan
@@ -400,6 +519,7 @@ class PaperBroker(BrokerAdapter):
                         "impact_cost_bps": float(impact_bps_map.get(code, 0.0)),
                         "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
                         "industry_weight_post": float(industry_weight_map.get(code, 0.0)),
+                        **lineage,
                     }
                 )
                 continue
@@ -443,6 +563,7 @@ class PaperBroker(BrokerAdapter):
                     "impact_cost_bps": float(impact_bps),
                     "unfilled_target_weight": float(unfilled_weight_map.get(code, 0.0)),
                     "industry_weight_post": float(industry_weight_map.get(code, 0.0)),
+                    **lineage,
                 }
             )
             fill_rows.append(
@@ -462,10 +583,38 @@ class PaperBroker(BrokerAdapter):
                 }
             )
 
+        prior_blocked_sell_risk = self._active_prior_blocked_sell_risk(
+            prior_state=state,
+            positions=positions,
+            target_qty_map=target_qty_map,
+            bars_idx=bars_idx,
+            trade_date=trade_date,
+            nav_pre=nav_pre,
+        )
+        freeze_min_weight = float(self.blocked_exit_freeze_min_weight)
+        same_day_exit_block_freeze = bool(
+            blocked_sell_order_count > 0 and blocked_sell_current_weight_total >= freeze_min_weight - 1e-12
+        )
+        prior_state_exit_block_freeze = bool(
+            prior_blocked_sell_risk["active_blocked_sell_state_count"] > 0
+            and prior_blocked_sell_risk["active_blocked_sell_state_weight"] >= freeze_min_weight - 1e-12
+        )
         buy_freeze_due_to_exit_block = bool(
-            self.block_buy_on_exit_blocked
-            and blocked_sell_order_count > 0
-            and blocked_sell_current_weight_total >= float(self.blocked_exit_freeze_min_weight) - 1e-12
+            self.block_buy_on_exit_blocked and (same_day_exit_block_freeze or prior_state_exit_block_freeze)
+        )
+        freeze_reasons: list[str] = []
+        if same_day_exit_block_freeze:
+            freeze_reasons.append("same_day_exit_block")
+        if prior_state_exit_block_freeze:
+            freeze_reasons.append("active_blocked_sell_state")
+        blocked_exit_freeze_reason = "+".join(freeze_reasons)
+        blocked_exit_freeze_sell_weight = max(
+            float(blocked_sell_current_weight_total),
+            float(prior_blocked_sell_risk["active_blocked_sell_state_weight"]),
+        )
+        blocked_exit_freeze_sell_notional = max(
+            float(blocked_sell_notional_total),
+            float(prior_blocked_sell_risk["active_blocked_sell_state_notional"]),
         )
 
         for code in sorted(all_codes, key=lambda x: rank_map.get(x, 9999)):
@@ -579,10 +728,128 @@ class PaperBroker(BrokerAdapter):
             prev_cost = _safe_float(positions.get(code, {}).get("avg_cost", 0.0), 0.0)
             new_qty = prev_qty + qty_fill
             new_cost = (prev_qty * prev_cost + qty_fill * fill_px) / max(new_qty, 1)
+            prior_pos = positions.get(code, {}) if isinstance(positions.get(code, {}), dict) else {}
+            signal_lineage = signal_lineage_map.get(code, {})
+            if prev_qty > 0 and prior_pos:
+                entry_signal_date = str(prior_pos.get("entry_signal_date", "") or signal_lineage.get("entry_signal_date", ""))
+                entry_trade_date = str(prior_pos.get("entry_trade_date", "") or trade_date.strftime("%Y-%m-%d"))
+                entry_safe = _safe_float(
+                    prior_pos.get("entry_tradability_safe_score", signal_lineage.get("entry_tradability_safe_score", np.nan)),
+                    np.nan,
+                )
+                entry_risk = _safe_float(
+                    prior_pos.get(
+                        "entry_tradability_entry_risk_score",
+                        signal_lineage.get("entry_tradability_entry_risk_score", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_headroom = _safe_float(
+                    prior_pos.get(
+                        "entry_tradability_limit_headroom_pct",
+                        signal_lineage.get("entry_tradability_limit_headroom_pct", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_exit_safe = _safe_float(
+                    prior_pos.get("entry_exit_trap_safe_score", signal_lineage.get("entry_exit_trap_safe_score", np.nan)),
+                    np.nan,
+                )
+                entry_exit_risk = _safe_float(
+                    prior_pos.get("entry_exit_trap_risk_score", signal_lineage.get("entry_exit_trap_risk_score", np.nan)),
+                    np.nan,
+                )
+                entry_exit_headroom = _safe_float(
+                    prior_pos.get(
+                        "entry_exit_trap_downside_headroom_pct",
+                        signal_lineage.get("entry_exit_trap_downside_headroom_pct", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_exit_volume_drought = _safe_float(
+                    prior_pos.get(
+                        "entry_exit_trap_volume_drought_risk",
+                        signal_lineage.get("entry_exit_trap_volume_drought_risk", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_exit_drawdown_10d = _safe_float(
+                    prior_pos.get(
+                        "entry_exit_trap_drawdown_10d_pct",
+                        signal_lineage.get("entry_exit_trap_drawdown_10d_pct", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_exit_down_momentum_5d = _safe_float(
+                    prior_pos.get(
+                        "entry_exit_trap_down_momentum_5d",
+                        signal_lineage.get("entry_exit_trap_down_momentum_5d", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_exit_volatility_10d = _safe_float(
+                    prior_pos.get(
+                        "entry_exit_trap_volatility_10d",
+                        signal_lineage.get("entry_exit_trap_volatility_10d", np.nan),
+                    ),
+                    np.nan,
+                )
+                entry_reserve = _safe_int(
+                    prior_pos.get("entry_reserve_candidate", signal_lineage.get("entry_reserve_candidate", 0)),
+                    0,
+                )
+            else:
+                entry_signal_date = str(signal_lineage.get("entry_signal_date", signal_date.strftime("%Y-%m-%d")) or "")
+                entry_trade_date = trade_date.strftime("%Y-%m-%d")
+                entry_safe = _safe_float(signal_lineage.get("entry_tradability_safe_score", np.nan), np.nan)
+                entry_risk = _safe_float(signal_lineage.get("entry_tradability_entry_risk_score", np.nan), np.nan)
+                entry_headroom = _safe_float(signal_lineage.get("entry_tradability_limit_headroom_pct", np.nan), np.nan)
+                entry_exit_safe = _safe_float(signal_lineage.get("entry_exit_trap_safe_score", np.nan), np.nan)
+                entry_exit_risk = _safe_float(signal_lineage.get("entry_exit_trap_risk_score", np.nan), np.nan)
+                entry_exit_headroom = _safe_float(
+                    signal_lineage.get("entry_exit_trap_downside_headroom_pct", np.nan), np.nan
+                )
+                entry_exit_volume_drought = _safe_float(
+                    signal_lineage.get("entry_exit_trap_volume_drought_risk", np.nan), np.nan
+                )
+                entry_exit_drawdown_10d = _safe_float(
+                    signal_lineage.get("entry_exit_trap_drawdown_10d_pct", np.nan), np.nan
+                )
+                entry_exit_down_momentum_5d = _safe_float(
+                    signal_lineage.get("entry_exit_trap_down_momentum_5d", np.nan), np.nan
+                )
+                entry_exit_volatility_10d = _safe_float(
+                    signal_lineage.get("entry_exit_trap_volatility_10d", np.nan), np.nan
+                )
+                entry_reserve = _safe_int(signal_lineage.get("entry_reserve_candidate", 0), 0)
             positions[code] = {
                 "name": name,
                 "qty": int(new_qty),
                 "avg_cost": float(new_cost),
+                "entry_signal_date": entry_signal_date,
+                "entry_trade_date": entry_trade_date,
+                "entry_tradability_safe_score": float(entry_safe) if np.isfinite(entry_safe) else None,
+                "entry_tradability_entry_risk_score": float(entry_risk) if np.isfinite(entry_risk) else None,
+                "entry_tradability_limit_headroom_pct": float(entry_headroom) if np.isfinite(entry_headroom) else None,
+                "entry_exit_trap_safe_score": float(entry_exit_safe) if np.isfinite(entry_exit_safe) else None,
+                "entry_exit_trap_risk_score": float(entry_exit_risk) if np.isfinite(entry_exit_risk) else None,
+                "entry_exit_trap_downside_headroom_pct": (
+                    float(entry_exit_headroom) if np.isfinite(entry_exit_headroom) else None
+                ),
+                "entry_exit_trap_volume_drought_risk": (
+                    float(entry_exit_volume_drought) if np.isfinite(entry_exit_volume_drought) else None
+                ),
+                "entry_exit_trap_drawdown_10d_pct": (
+                    float(entry_exit_drawdown_10d) if np.isfinite(entry_exit_drawdown_10d) else None
+                ),
+                "entry_exit_trap_down_momentum_5d": (
+                    float(entry_exit_down_momentum_5d) if np.isfinite(entry_exit_down_momentum_5d) else None
+                ),
+                "entry_exit_trap_volatility_10d": (
+                    float(entry_exit_volatility_10d) if np.isfinite(entry_exit_volatility_10d) else None
+                ),
+                "entry_reserve_candidate": int(entry_reserve),
+                "last_buy_signal_date": signal_date.strftime("%Y-%m-%d"),
                 "last_trade_date": trade_date.strftime("%Y-%m-%d"),
             }
 
@@ -647,6 +914,90 @@ class PaperBroker(BrokerAdapter):
         else:
             blocked_exit_freeze_orders = 0
             blocked_exit_freeze_target_weight = 0.0
+        if not orders_df.empty:
+            exit_mask = (
+                orders_df["status"].astype(str).eq("blocked")
+                & orders_df["side"].astype(str).eq("SELL")
+                & orders_df["reason"].astype(str).eq("exit_not_tradable")
+            )
+            exit_orders = orders_df.loc[exit_mask].copy()
+        else:
+            exit_orders = pd.DataFrame()
+        if not exit_orders.empty:
+            entry_safe = pd.to_numeric(
+                exit_orders.get("position_entry_tradability_safe_score", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            entry_risk = pd.to_numeric(
+                exit_orders.get("position_entry_risk_score", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            entry_headroom = pd.to_numeric(
+                exit_orders.get("position_entry_limit_headroom_pct", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            entry_exit_risk = pd.to_numeric(
+                exit_orders.get("position_entry_exit_trap_risk_score", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            entry_exit_safe = pd.to_numeric(
+                exit_orders.get("position_entry_exit_trap_safe_score", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            entry_exit_volume_drought = pd.to_numeric(
+                exit_orders.get("position_entry_exit_trap_volume_drought_risk", pd.Series(dtype=float)),
+                errors="coerce",
+            )
+            blocked_weights = pd.to_numeric(
+                exit_orders.get("blocked_current_weight", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0.0)
+
+            def _weighted_mean(vals: pd.Series, weights: pd.Series) -> float:
+                valid = vals.notna() & weights.gt(0)
+                if not valid.any():
+                    return float(vals.dropna().mean()) if vals.notna().any() else 0.0
+                return float((vals.loc[valid] * weights.loc[valid]).sum() / max(float(weights.loc[valid].sum()), 1e-12))
+
+            blocked_sell_entry_safe_mean = float(entry_safe.dropna().mean()) if entry_safe.notna().any() else 0.0
+            blocked_sell_entry_risk_mean = float(entry_risk.dropna().mean()) if entry_risk.notna().any() else 0.0
+            blocked_sell_entry_risk_weighted_mean = _weighted_mean(entry_risk, blocked_weights)
+            blocked_sell_entry_safe_weighted_mean = _weighted_mean(entry_safe, blocked_weights)
+            blocked_sell_entry_exit_risk_mean = float(entry_exit_risk.dropna().mean()) if entry_exit_risk.notna().any() else 0.0
+            blocked_sell_entry_exit_risk_weighted_mean = _weighted_mean(entry_exit_risk, blocked_weights)
+            blocked_sell_entry_exit_safe_weighted_mean = _weighted_mean(entry_exit_safe, blocked_weights)
+            blocked_sell_entry_exit_volume_drought_weighted_mean = _weighted_mean(
+                entry_exit_volume_drought, blocked_weights
+            )
+            blocked_sell_entry_headroom_min = float(entry_headroom.dropna().min()) if entry_headroom.notna().any() else 0.0
+            blocked_sell_high_entry_risk_orders = int((entry_risk.fillna(0.0) >= 0.50).sum())
+            blocked_sell_high_entry_exit_risk_orders = int((entry_exit_risk.fillna(0.0) >= 0.65).sum())
+            blocked_sell_high_entry_exit_volume_drought_orders = int((entry_exit_volume_drought.fillna(0.0) >= 0.65).sum())
+            blocked_sell_low_entry_safety_orders = int((entry_safe.fillna(1.0) <= 0.50).sum())
+            blocked_sell_reserve_entry_orders = int(
+                pd.to_numeric(
+                    exit_orders.get("position_entry_reserve_candidate", pd.Series(dtype=float)),
+                    errors="coerce",
+                )
+                .fillna(0.0)
+                .gt(0)
+                .sum()
+            )
+        else:
+            blocked_sell_entry_safe_mean = 0.0
+            blocked_sell_entry_risk_mean = 0.0
+            blocked_sell_entry_risk_weighted_mean = 0.0
+            blocked_sell_entry_safe_weighted_mean = 0.0
+            blocked_sell_entry_exit_risk_mean = 0.0
+            blocked_sell_entry_exit_risk_weighted_mean = 0.0
+            blocked_sell_entry_exit_safe_weighted_mean = 0.0
+            blocked_sell_entry_exit_volume_drought_weighted_mean = 0.0
+            blocked_sell_entry_headroom_min = 0.0
+            blocked_sell_high_entry_risk_orders = 0
+            blocked_sell_high_entry_exit_risk_orders = 0
+            blocked_sell_high_entry_exit_volume_drought_orders = 0
+            blocked_sell_low_entry_safety_orders = 0
+            blocked_sell_reserve_entry_orders = 0
         blocked_order_state, blocked_state_metrics = (
             self._update_blocked_order_state(prior_state=state, orders_df=orders_df, trade_date=trade_date)
             if self.blocked_state_enabled
@@ -686,9 +1037,40 @@ class PaperBroker(BrokerAdapter):
             "blocked_sell_current_weight": float(blocked_sell_current_weight_total),
             "blocked_sell_notional": float(blocked_sell_notional_total),
             "blocked_sell_orders": int(blocked_sell_order_count),
+            "blocked_sell_entry_tradability_safe_score_mean": float(blocked_sell_entry_safe_mean),
+            "blocked_sell_entry_tradability_safe_score_weighted_mean": float(blocked_sell_entry_safe_weighted_mean),
+            "blocked_sell_entry_risk_score_mean": float(blocked_sell_entry_risk_mean),
+            "blocked_sell_entry_risk_score_weighted_mean": float(blocked_sell_entry_risk_weighted_mean),
+            "blocked_sell_entry_exit_trap_risk_score_mean": float(blocked_sell_entry_exit_risk_mean),
+            "blocked_sell_entry_exit_trap_risk_score_weighted_mean": float(
+                blocked_sell_entry_exit_risk_weighted_mean
+            ),
+            "blocked_sell_entry_exit_trap_safe_score_weighted_mean": float(
+                blocked_sell_entry_exit_safe_weighted_mean
+            ),
+            "blocked_sell_entry_exit_trap_volume_drought_risk_weighted_mean": float(
+                blocked_sell_entry_exit_volume_drought_weighted_mean
+            ),
+            "blocked_sell_entry_limit_headroom_min": float(blocked_sell_entry_headroom_min),
+            "blocked_sell_high_entry_risk_orders": int(blocked_sell_high_entry_risk_orders),
+            "blocked_sell_high_entry_exit_trap_risk_orders": int(blocked_sell_high_entry_exit_risk_orders),
+            "blocked_sell_high_entry_exit_trap_volume_drought_orders": int(
+                blocked_sell_high_entry_exit_volume_drought_orders
+            ),
+            "blocked_sell_low_entry_safety_orders": int(blocked_sell_low_entry_safety_orders),
+            "blocked_sell_reserve_entry_orders": int(blocked_sell_reserve_entry_orders),
             "blocked_exit_buy_freeze": int(buy_freeze_due_to_exit_block),
+            "blocked_exit_freeze_reason": str(blocked_exit_freeze_reason),
+            "blocked_exit_freeze_sell_weight": float(blocked_exit_freeze_sell_weight),
+            "blocked_exit_freeze_sell_notional": float(blocked_exit_freeze_sell_notional),
             "blocked_exit_freeze_orders": int(blocked_exit_freeze_orders),
             "blocked_exit_freeze_target_weight": float(blocked_exit_freeze_target_weight),
+            "active_blocked_sell_state_count": float(prior_blocked_sell_risk["active_blocked_sell_state_count"]),
+            "active_blocked_sell_state_weight": float(prior_blocked_sell_risk["active_blocked_sell_state_weight"]),
+            "active_blocked_sell_state_notional": float(prior_blocked_sell_risk["active_blocked_sell_state_notional"]),
+            "active_blocked_sell_state_max_consecutive_days": float(
+                prior_blocked_sell_risk["active_blocked_sell_state_max_consecutive_days"]
+            ),
         }
         for k, v in blocked_state_metrics.items():
             ledger_row[k] = float(v)

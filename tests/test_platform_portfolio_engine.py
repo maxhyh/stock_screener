@@ -165,6 +165,102 @@ def test_build_portfolio_decision_uses_reserve_rows_after_primary_capacity_clip(
     assert decision.diagnostics["constraints"]["max_names"] == 2
 
 
+def test_build_portfolio_decision_respects_reserve_cap_during_redistribution():
+    candidates = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003", "000004"],
+            "ML评分": [0.95, 0.90, 0.85, 0.80],
+            "industry": ["银行", "电子", "医药", "通信"],
+            "amount_ma20": [1_000_000.0, 100_000_000.0, 100_000_000.0, 100_000_000.0],
+            "reserve_candidate": [0, 0, 1, 1],
+        }
+    )
+
+    capped = build_portfolio_decision(
+        candidates,
+        PortfolioConstraints(
+            total_target=0.60,
+            single_cap=0.30,
+            max_names=2,
+            adv_participation_cap=0.04,
+            capital_base=1_000_000.0,
+            amount_col="amount_ma20",
+            redistribute_clipped=True,
+            reserve_cap=0.10,
+            reserve_col="reserve_candidate",
+        ),
+    )
+    uncapped = build_portfolio_decision(
+        candidates,
+        PortfolioConstraints(
+            total_target=0.60,
+            single_cap=0.30,
+            max_names=2,
+            adv_participation_cap=0.04,
+            capital_base=1_000_000.0,
+            amount_col="amount_ma20",
+            redistribute_clipped=True,
+            reserve_cap=0.0,
+            reserve_col="reserve_candidate",
+        ),
+    )
+
+    capped_reserve_weight = float(
+        capped.selected.loc[
+            pd.to_numeric(capped.selected.get("reserve_candidate", 0), errors="coerce").fillna(0.0).gt(0),
+            "target_weight",
+        ].sum()
+    )
+    assert capped_reserve_weight <= 0.10 + 1e-12
+    assert capped.exposures["reserve_weight"] <= 0.10 + 1e-12
+    assert capped.exposures["capacity_shortfall_weight"] > 0.0
+    assert capped.diagnostics["constraints"]["reserve_cap"] == 0.10
+    assert capped.diagnostics["blocked"]
+    assert any("reserve_weight_clip" in str(row.get("constraint_reason", "")) for row in capped.diagnostics["blocked"])
+    assert uncapped.exposures["reserve_weight"] > capped.exposures["reserve_weight"]
+
+
+def test_build_portfolio_decision_caps_exit_trap_risk_budget():
+    candidates = pd.DataFrame(
+        {
+            "代码": ["000001", "000002", "000003", "000004"],
+            "ML评分": [0.99, 0.98, 0.60, 0.50],
+            "industry": ["银行", "电子", "医药", "通信"],
+            "amount_ma20": [100_000_000.0] * 4,
+            "exit_trap_risk_score": [0.92, 0.85, 0.10, 0.05],
+        }
+    )
+
+    decision = build_portfolio_decision(
+        candidates,
+        PortfolioConstraints(
+            total_target=0.60,
+            single_cap=0.30,
+            max_names=2,
+            adv_participation_cap=0.10,
+            capital_base=1_000_000.0,
+            amount_col="amount_ma20",
+            redistribute_clipped=True,
+            exit_trap_risk_threshold=0.65,
+            exit_trap_weight_cap=0.08,
+            exit_trap_single_cap=0.05,
+        ),
+    )
+
+    selected = decision.selected.set_index("代码")
+    high_risk_weight = float(selected.loc[selected["exit_trap_flag"].astype(int).gt(0), "target_weight"].sum())
+    assert high_risk_weight <= 0.08 + 1e-12
+    assert float(selected.loc["000001", "target_weight"]) <= 0.05 + 1e-12
+    assert decision.exposures["exit_trap_weight"] <= 0.08 + 1e-12
+    assert decision.diagnostics["constraints"]["exit_trap_weight_cap"] == 0.08
+    reason_rows = pd.concat([decision.selected, pd.DataFrame(decision.diagnostics["blocked"])], ignore_index=True)
+    assert any(
+        "exit_trap_weight_clip" in str(row.get("constraint_reason", ""))
+        or "exit_trap_single_clip" in str(row.get("constraint_reason", ""))
+        for row in reason_rows.to_dict(orient="records")
+    )
+
+
 def test_build_portfolio_decision_redistribution_respects_industry_cap():
     candidates = pd.DataFrame(
         {

@@ -34,10 +34,10 @@ sys.path.insert(0, BASE_DIR)
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series, limit_ratio_for_stock
 from utils.alert import AlertManager, AlertLevel, get_default_alert_manager
 from core.risk.intraday_monitor import IntradayRiskMonitor, IntradayRiskConfig
+from core.data import AShareMarketDataGateway
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 
 OUTPUT_DIR = Path(BASE_DIR) / "output"
-DATA_DIR = Path(BASE_DIR) / "data"
-PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
 DEFAULT_STATE = OUTPUT_DIR / "execution" / "paper_portfolio_state.json"
 
 
@@ -49,11 +49,13 @@ def _load_state(state_file: Path) -> dict:
 
 
 def _load_latest_prices(codes: list[str]) -> dict[str, dict]:
-    """加载最新行情数据。"""
-    if not PARQUET_FILE.exists():
+    """Load the latest ODS bar partition for current holdings."""
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
         return {}
-    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"]
-    df = pd.read_parquet(PARQUET_FILE, columns=cols)
+    latest_session = sessions[-1]
+    df = gateway.load_bars(latest_session, latest_session)
     df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str))
     df["ts_code"] = normalize_ts_code_series(df["ts_code"])
     df = df[df["ts_code"].isin(codes)].copy()
@@ -76,22 +78,9 @@ def _load_latest_prices(codes: list[str]) -> dict[str, dict]:
 
 
 def _load_industry_map() -> dict[str, str]:
-    """加载行业映射。"""
-    for name in ["stock_info.csv", "stock_metadata.csv"]:
-        fp = DATA_DIR / name
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype=str)
-            code_col = "ts_code" if "ts_code" in df.columns else "代码" if "代码" in df.columns else None
-            ind_col = "industry" if "industry" in df.columns else "行业" if "行业" in df.columns else None
-            if not code_col or not ind_col:
-                continue
-            df["code"] = normalize_ts_code_series(df[code_col])
-            return dict(zip(df["code"], df[ind_col].fillna("未知")))
-        except Exception:
-            continue
-    return {}
+    """Load industry metadata as of the latest shared ODS session."""
+    sessions = AShareMarketDataGateway().available_trade_dates()
+    return load_ods_industry_map(asof_date=sessions[-1]) if sessions else {}
 
 
 def generate_report(state_file: Path) -> str:

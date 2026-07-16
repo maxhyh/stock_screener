@@ -26,11 +26,11 @@ sys.path.insert(0, os.path.join(BASE_DIR, 'core'))
 
 from mfts_screener import calc_indicators
 from config.settings import TrainingConfig
+from core.data.market_data_gateway import AShareMarketDataGateway
 from core.platform.experiment_registry import build_experiment_record, register_experiment
 from core.platform.run_manifest import build_file_version
 
 # 配置
-DATA_FILE = os.path.join(BASE_DIR, "data/daily_all_5y.parquet")
 IC_RESULT_FILE = os.path.join(BASE_DIR, "output/factor_ic_analysis_T1.csv")
 IC_RESULT_FILE_BACKTEST = os.path.join(BASE_DIR, "output/backtest/factor_ic_analysis_T1.csv")
 OUTPUT_DIR = os.path.join(BASE_DIR, "models")
@@ -46,6 +46,7 @@ TEST_END = '2025-12-26'
 
 # 分批处理参数（从统一配置读取，按硬件自适应）
 BATCH_SIZE = TrainingConfig.BATCH_SIZE
+LAST_MARKET_DATA_LINEAGE: dict[str, object] = {}
 
 
 def select_features_by_ic(ic_file, min_ic=0.01, top_n=None):
@@ -181,8 +182,18 @@ def prepare_data_streaming(feature_cols, label_mode='open_to_open', label_horizo
     columns_needed = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 
                       'vol', 'amount', 'pct_chg']
     
-    print("\n加载原始数据...")
-    df_raw = pd.read_parquet(DATA_FILE, columns=columns_needed)
+    print("\n从共享只读 ODS 加载原始数据...")
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates(start=TRAIN_START)
+    if not sessions:
+        raise RuntimeError("共享 ODS 没有可用于训练的日线会话")
+    df_raw = gateway.load_bars(TRAIN_START, sessions[-1], include_bj9=False)
+    global LAST_MARKET_DATA_LINEAGE
+    LAST_MARKET_DATA_LINEAGE = dict(df_raw.attrs.get("market_data_lineage", {}))
+    missing_columns = [column for column in columns_needed if column not in df_raw.columns]
+    if missing_columns:
+        raise RuntimeError(f"共享 ODS 缺少训练所需字段: {missing_columns}")
+    df_raw = df_raw[columns_needed].copy()
     df_raw['trade_date'] = pd.to_datetime(df_raw['trade_date'].astype(str))
     df_raw['ts_code'] = df_raw['ts_code'].astype(str)
     
@@ -487,7 +498,7 @@ def save_model(model, feature_cols, metrics, ic_selected, label_mode, label_hori
             "importance_file": importance_file,
         },
         lineage={
-            "data_file": build_file_version(DATA_FILE).__dict__,
+            "market_data": LAST_MARKET_DATA_LINEAGE,
             "ic_file": build_file_version(resolve_ic_result_file() or "").__dict__,
         },
     )

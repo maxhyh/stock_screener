@@ -78,10 +78,9 @@ def create_app() -> Flask:
         {
             "BASE_DIR": BASE_DIR,
             "DATA_DIR": data_dir,
+            "ASHARE_DATA_ROOT": os.environ.get("ASHARE_DATA_ROOT", "").strip(),
             "OUTPUT_DIR": output_dir,
             "RESULT_FILE": os.path.join(output_dir, "mfts_latest.csv"),
-            "PARQUET_FILE": os.path.join(data_dir, "daily_all_5y.parquet"),
-            "META_FILE": os.path.join(data_dir, "stock_info.csv"),
             "MFTS_LOGGER": create_logger(BASE_DIR),
             "CREATED_AT": datetime.now().isoformat(),
             "LOCAL_ONLY": local_only,

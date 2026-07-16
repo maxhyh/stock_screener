@@ -20,10 +20,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from utils.output_paths import ensure_output_dirs, list_dual
+from core.data.market_data_gateway import AShareMarketDataGateway
 
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-DATA_DIR = os.path.join(BASE_DIR, "data")
-PARQUET_FILE = os.path.join(DATA_DIR, "daily_all_5y.parquet")
 STATS_FILE = os.path.join(OUTPUT_DIR, "backtest", "signal_stats.json")
 LEGACY_STATS_FILE = os.path.join(OUTPUT_DIR, "signal_stats.json")
 
@@ -103,14 +102,14 @@ def load_historical_scans(start_date=None, end_date=None):
     return combined
 
 
-def load_market_data():
-    """加载市场数据用于计算收益"""
-    if not os.path.exists(PARQUET_FILE):
-        print(f"❌ 市场数据文件不存在: {PARQUET_FILE}")
+def load_market_data(start_date: str, end_date: str):
+    """从共享只读 ODS 加载计算收益所需的有界市场窗口。"""
+    print("📊 从共享只读 ODS 加载市场数据...")
+    gateway = AShareMarketDataGateway()
+    df = gateway.load_bars(start_date, end_date, include_bj9=True, forward_sessions=10)
+    if df.empty:
+        print("❌ 共享 ODS 未返回市场数据")
         return None
-    
-    print("📊 加载市场数据...")
-    df = pd.read_parquet(PARQUET_FILE)
     
     # 确保日期格式一致
     if 'trade_date' in df.columns:
@@ -294,7 +293,7 @@ def main(start_date=None, end_date=None):
     if scans_df is None:
         return
     
-    market_df = load_market_data()
+    market_df = load_market_data(scans_df['scan_date'].min(), scans_df['scan_date'].max())
     if market_df is None:
         return
     

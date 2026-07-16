@@ -1,6 +1,6 @@
 ---
 name: audit-a-share-quant-project
-description: Deep audit, recurring maintenance, performance review, and robustness hardening for this specific A-share quant trading repository. Use when Codex needs to inspect or continuously improve this repo's Python strategy, data pipeline, training, backtest, execution, or orchestration code for look-ahead bias, A-share trading-rule mismatches, ST or suspension filtering gaps, slippage and tax mistakes, Pandas bottlenecks, risk-control inconsistencies, architecture improvements, or long-term project health.
+description: Deep audit, recurring maintenance, performance review, documentation/skill hygiene, and robustness hardening for this specific A-share quant trading repository. Use when Codex needs to inspect or continuously improve this repo's Python strategy, data pipeline, training, backtest, execution, orchestration, documentation, local skills, or project memory for look-ahead bias, A-share trading-rule mismatches, ST or suspension filtering gaps, slippage and tax mistakes, Pandas bottlenecks, risk-control inconsistencies, architecture improvements, duplicate docs/skills, or long-term project health.
 ---
 
 # Audit A Share Quant Project
@@ -14,10 +14,12 @@ Audit this repository as an A-share production trading system, not as a generic 
 - Treat this as a repo-specific skill. Read code before recommending structural changes.
 - Read [references/project-map.md](references/project-map.md) first for entrypoints and likely hotspots.
 - Read [references/maintenance-loop.md](references/maintenance-loop.md) when the task is ongoing optimization, not a one-off review.
+- Read [references/codex-engineering-discipline.md](references/codex-engineering-discipline.md) before making strategy, execution, promotion, or architecture changes.
 - Read [references/priority-model.md](references/priority-model.md) before ranking findings or choosing the next maintenance target.
 - Read [references/output-template.md](references/output-template.md) when the user wants a full audit report or a recurring maintenance summary.
 - Run `python skills/audit-a-share-quant-project/scripts/find_audit_hotspots.py` from the repo root to surface likely bias, performance, and robustness matches.
 - Run `python skills/audit-a-share-quant-project/scripts/build_maintenance_snapshot.py` from the repo root when you need a recurring status snapshot before or after a maintenance pass.
+- For documentation or skill-hygiene tasks, inspect `docs/DOCUMENTATION_AND_SKILLS.md`, `docs/README.md`, `docs/PROJECT_INDEX.md`, `AGENTS.md`, `agent.md`, and this skill's `references/`.
 - When the task is strategy promotion or shadow tracking, also inspect:
   `scripts/quant_p2_rolling_replay.py`
   `scripts/quant_p2_shadow_diagnosis.py`
@@ -49,10 +51,13 @@ Audit this repository as an A-share production trading system, not as a generic 
 ## Maintenance Mode
 
 - Treat this skill as cumulative. Each use should either reduce confirmed risk, improve observability, or leave behind a reusable test or tool.
+- Apply the Codex engineering discipline: think before changing, keep patches simple, preserve evidence lineage, and define verification before coding.
 - Do not repeat closed findings without checking whether the code or data path changed.
 - Prefer small, high-leverage fixes over wide refactors unless the user explicitly asks for architectural change.
 - When you confirm and fix a risk, update tests or add a new regression that would fail on the old behavior.
 - Leave a clear “next maintenance target” when the current pass surfaces more issues than should be fixed in one go.
+- Do not request external expert review after every pass. Keep working locally when the next patch, replay, attribution, or promotion artifact is clear. Escalate only for genuine uncertainty, strategic forks, unresolved methodology risk, or near-promotion/default-profile decisions that need independent scrutiny.
+- When expert review is needed, first prepare a clean GitHub snapshot, then provide a complete expert prompt that states the expert role, current repository state, evidence paths, unresolved questions, and the specific decision needing review.
 
 ## Prioritization Rules
 
@@ -69,6 +74,8 @@ Audit this repository as an A-share production trading system, not as a generic 
 
 - Keep strategy logic, execution realism, and orchestration concerns separated.
 - Prefer repo-native scripts and references over long repeated explanation in future turns.
+- Keep documentation responsibilities separated: `README.md` for onboarding, `docs/PROJECT_INDEX.md` for topology, `docs/WORKFLOW.md` for commands, `docs/DOCUMENTATION_AND_SKILLS.md` for doc/skill governance, and expert-review docs only for review snapshots.
+- Do not add a new repo-local skill unless its trigger boundary is stable, recurring, and clearly separate from this audit skill.
 - When you discover a recurring repo pattern, encode it here or in `references/` so the next maintenance pass starts with better context.
 - Use maintenance snapshots to compare whether hotspot counts and risk surfaces are shrinking over time.
 - Treat shadow diagnostics as first-class maintenance evidence when the current target is a profile or strategy candidate rather than a core engine bug.
@@ -120,5 +127,6 @@ Audit this repository as an A-share production trading system, not as a generic 
 - Read [references/project-map.md](references/project-map.md) for repo topology and likely hotspot files.
 - Read [references/audit-checklist.md](references/audit-checklist.md) for repo-specific audit checks and response shape.
 - Read [references/maintenance-loop.md](references/maintenance-loop.md) for recurring optimization workflow.
+- Read [references/codex-engineering-discipline.md](references/codex-engineering-discipline.md) for the project-specific adaptation of Karpathy-style coding-agent discipline.
 - Read [references/priority-model.md](references/priority-model.md) for finding severity and maintenance target selection.
 - Read [references/output-template.md](references/output-template.md) for reusable report shapes.

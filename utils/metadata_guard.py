@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.data.market_data_gateway import AShareMarketDataGateway
+
 
 def load_metadata_health(data_dir: str | Path) -> dict[str, object]:
     """读取股票元数据的行业覆盖率与文件新鲜度。"""
@@ -55,6 +57,54 @@ def load_metadata_health(data_dir: str | Path) -> dict[str, object]:
     }
 
 
+def load_ods_metadata_health(asof_date: object) -> dict[str, object]:
+    """Measure industry coverage from read-only ODS metadata as of a signal date.
+
+    ODS snapshots are selected as-of the historical signal date, so staleness
+    is not inferred from the local machine clock. The selected snapshot lineage
+    remains attached for P2 and promotion evidence.
+    """
+    frame = AShareMarketDataGateway().load_stock_info(asof_date, include_bj9=True)
+    lineage = dict(frame.attrs.get("market_data_lineage", {}))
+    if frame.empty:
+        return {
+            "file": "ashare_ods:instrument_master",
+            "rows": 0,
+            "industry_nonempty": 0,
+            "coverage_pct": 0.0,
+            "ok": False,
+            "modified_at": "",
+            "age_days": float("inf"),
+            "lineage": lineage,
+        }
+    ind_col = "industry" if "industry" in frame.columns else ("行业" if "行业" in frame.columns else None)
+    if ind_col is None:
+        return {
+            "file": "ashare_ods:instrument_master",
+            "rows": int(len(frame)),
+            "industry_nonempty": 0,
+            "coverage_pct": 0.0,
+            "ok": False,
+            "modified_at": "",
+            "age_days": float("inf"),
+            "lineage": lineage,
+        }
+    industry = frame[ind_col].where(~frame[ind_col].isna(), "").astype(str).str.strip()
+    industry = industry.replace({"nan": "", "None": "", "NONE": ""})
+    rows = int(len(frame))
+    nonempty = int(industry.ne("").sum())
+    return {
+        "file": "ashare_ods:instrument_master",
+        "rows": rows,
+        "industry_nonempty": nonempty,
+        "coverage_pct": float(nonempty / max(rows, 1) * 100.0),
+        "ok": True,
+        "modified_at": "asof:" + str(asof_date),
+        "age_days": 0.0,
+        "lineage": lineage,
+    }
+
+
 def evaluate_metadata_guard(
     info: dict[str, object],
     *,
@@ -62,8 +112,10 @@ def evaluate_metadata_guard(
     max_age_days: float,
 ) -> dict[str, object]:
     """评估元数据覆盖率与新鲜度是否满足执行门禁。"""
-    coverage_pct = float(info.get("coverage_pct", 0.0) or 0.0)
-    age_days = float(info.get("age_days", float("inf")) or float("inf"))
+    coverage_raw = info.get("coverage_pct", 0.0)
+    age_raw = info.get("age_days", float("inf"))
+    coverage_pct = float(0.0 if coverage_raw is None else coverage_raw)
+    age_days = float(float("inf") if age_raw is None else age_raw)
     base_ok = bool(info.get("ok", False))
     coverage_ok = coverage_pct >= max(0.0, float(min_coverage_pct))
     freshness_ok = age_days <= max(0.0, float(max_age_days))

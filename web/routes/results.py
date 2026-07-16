@@ -17,6 +17,7 @@ from flask import Blueprint, current_app, jsonify, render_template, request, sen
 
 from web.services import calculate_statistics, get_verification_data, load_platform_overview, load_scan_results
 from web.security import require_mutation_auth
+from core.data import AShareMarketDataGateway
 
 bp = Blueprint("results", __name__)
 
@@ -182,74 +183,36 @@ def _normalize_stock_code(raw) -> str:
     return m.group(1) if m else s.zfill(6)
 
 
-def _build_stock_name_map(meta_file: str, daily_df: pd.DataFrame | None = None, scan_df: pd.DataFrame | None = None) -> dict[str, str]:
-    code_to_name: dict[str, str] = {}
-
-    def add_from_df(df: pd.DataFrame | None):
-        if df is None or df.empty:
-            return
-        if "代码" not in df.columns or "名称" not in df.columns:
-            return
-        sub = df[["代码", "名称"]].copy()
-        for code, name in sub.itertuples(index=False, name=None):
-            c = _normalize_stock_code(code)
-            n = str(name or "").strip()
-            if not c or not n or n.lower() == "nan":
-                continue
-            if n == c:
-                continue
-            code_to_name[c] = n
-
-    add_from_df(daily_df)
-    add_from_df(scan_df)
-
-    if os.path.exists(meta_file):
-        try:
-            mdf = pd.read_csv(meta_file, dtype=str)
-            if {"ts_code", "name"}.issubset(mdf.columns):
-                for ts_code, name in mdf[["ts_code", "name"]].itertuples(index=False, name=None):
-                    c = _normalize_stock_code(ts_code)
-                    n = str(name or "").strip()
-                    if c and n and n.lower() != "nan" and c not in code_to_name:
-                        code_to_name[c] = n
-            elif {"代码", "名称"}.issubset(mdf.columns):
-                for code, name in mdf[["代码", "名称"]].itertuples(index=False, name=None):
-                    c = _normalize_stock_code(code)
-                    n = str(name or "").strip()
-                    if c and n and n.lower() != "nan" and c not in code_to_name:
-                        code_to_name[c] = n
-        except Exception:
-            pass
-
-    return code_to_name
-
-
 @bp.route("/health")
 def health_check():
     cfg = current_app.config
     logger = cfg["MFTS_LOGGER"]
 
-    parquet_file = cfg["PARQUET_FILE"]
     result_file = cfg["RESULT_FILE"]
-    meta_file = cfg["META_FILE"]
     base_dir = cfg["BASE_DIR"]
     output_dir = cfg["OUTPUT_DIR"]
+    try:
+        gateway = AShareMarketDataGateway(cfg.get("ASHARE_DATA_ROOT") or None)
+        sessions = gateway.available_trade_dates()
+        latest_ods_session = sessions[-1] if sessions else ""
+        metadata = gateway.load_stock_info(latest_ods_session) if latest_ods_session else pd.DataFrame()
+    except Exception:
+        latest_ods_session = ""
+        metadata = pd.DataFrame()
 
     checks = {
         "flask_running": True,
-        "data_file_exists": os.path.exists(parquet_file),
+        "data_source": "ashare_ods",
+        "data_file_exists": bool(latest_ods_session),
+        "data_latest_trade_date": latest_ods_session,
         "result_file_exists": os.path.exists(result_file),
-        "meta_file_exists": os.path.exists(meta_file),
+        "meta_file_exists": not metadata.empty,
     }
-
-    if os.path.exists(parquet_file):
-        mtime = os.path.getmtime(parquet_file)
-        last_update = datetime.fromtimestamp(mtime)
-        age_hours = (datetime.now().timestamp() - mtime) / 3600
+    if latest_ods_session:
+        latest_dt = pd.Timestamp(latest_ods_session)
+        age_hours = max(0.0, (pd.Timestamp.now().tz_localize(None).normalize() - latest_dt).total_seconds() / 3600.0)
         checks["data_age_hours"] = round(age_hours, 1)
-        checks["data_is_fresh"] = age_hours < 48
-        checks["data_last_update"] = last_update.strftime("%Y-%m-%d %H:%M:%S")
-        checks["data_size_mb"] = round(os.path.getsize(parquet_file) / 1024 / 1024, 1)
+        checks["data_is_fresh"] = age_hours < 72.0
 
     if os.path.exists(result_file):
         mtime = os.path.getmtime(result_file)
@@ -365,7 +328,7 @@ def api_results():
         )
 
     codes = [r.get("代码", "") for r in results]
-    verification = get_verification_data(codes, scan_date, cfg["PARQUET_FILE"], logger=logger)
+    verification = get_verification_data(codes, scan_date, cfg.get("ASHARE_DATA_ROOT") or None, logger=logger)
     stats = calculate_statistics(results, verification)
 
     return jsonify(
@@ -407,22 +370,19 @@ def api_results_date_status():
             }
         )
 
-    # 无扫描文件时，检查主数据覆盖，帮助定位原因
+    # 无扫描文件时，检查共享 ODS 单日覆盖，帮助定位原因。
     coverage = 0
-    parquet_file = cfg["PARQUET_FILE"]
-    if os.path.exists(parquet_file):
-        try:
-            df = pd.read_parquet(parquet_file, columns=["trade_date", "ts_code"])
-            td = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dt.strftime("%Y%m%d")
-            day_df = df[td == ymd]
-            coverage = day_df["ts_code"].astype(str).str.split(".").str[0].nunique()
-        except Exception:
-            coverage = 0
+    try:
+        day = q_date.strftime("%Y-%m-%d")
+        df = AShareMarketDataGateway(cfg.get("ASHARE_DATA_ROOT") or None).load_bars(day, day)
+        coverage = int(df["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).nunique())
+    except Exception:
+        coverage = 0
 
     stage_min = int(os.environ.get("MFTS_STAGE_MIN_STOCKS", "3000"))
     if coverage == 0:
         status = "no_data"
-        message = "该日期主数据为空，请先补数。"
+        message = "该日期共享 ODS 无数据，请由外部数据供应链确认覆盖。"
     elif coverage < stage_min:
         status = "low_coverage"
         message = f"该日期覆盖仅 {coverage}，低于门槛 {stage_min}，通常会被策略跳过。"
@@ -451,16 +411,12 @@ def api_results_date_status():
 def api_trading_days():
     """返回最近 N 天交易日列表（YYYY-MM-DD），供前端日历控件禁用非交易日。"""
     cfg = current_app.config
-    parquet_file = cfg["PARQUET_FILE"]
     lookback_days = request.args.get("lookback_days", default=365, type=int)
     lookback_days = max(30, min(lookback_days, 2000))
 
-    if not os.path.exists(parquet_file):
-        return jsonify({"success": False, "error": "数据文件不存在"}), 404
-
     try:
-        df = pd.read_parquet(parquet_file, columns=["trade_date"])
-        dt = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dropna()
+        sessions = AShareMarketDataGateway(cfg.get("ASHARE_DATA_ROOT") or None).available_trade_dates()
+        dt = pd.to_datetime(pd.Series(sessions), errors="coerce").dropna()
         if dt.empty:
             return jsonify({"success": True, "trading_days": []})
 
@@ -537,65 +493,30 @@ def api_run_scan():
 
 @bp.route("/api/download_data", methods=["POST"])
 def api_download_data():
-    cfg = current_app.config
-    logger = cfg["MFTS_LOGGER"]
-    ok, auth_resp = require_mutation_auth("download_data")
-    if not ok:
-        return auth_resp
-    try:
-        payload = request.get_json(silent=True) or {}
-        date_str = str(payload.get("date", "") or "").strip()
-        if date_str and not re.match(r"^\d{8}$", date_str):
-            return jsonify({"success": False, "error": "date 参数格式应为 YYYYMMDD"}), 400
-
-        # 统一到生产链路：优先增量更新，而非全量重下。
-        script_path = os.path.join(cfg["BASE_DIR"], "scripts", "daily_incremental_update.py")
-        cmd = [sys.executable, script_path]
-        if date_str:
-            cmd.extend(["--target-date", date_str])
-
-        result = subprocess.run(
-            cmd,
-            cwd=cfg["BASE_DIR"],
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
-        return jsonify(
-            {
-                "success": result.returncode == 0,
-                "command": cmd,
-                "output": result.stdout,
-                "error": result.stderr,
-            }
-        )
-    except Exception as e:
-        logger.error(f"数据下载触发失败: {e}", exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify(
+        {
+            "success": False,
+            "error": "此项目只读消费共享 A 股 ODS；数据下载和更新由外部数据供应链维护。",
+        }
+    ), 410
 
 
 @bp.route("/api/stock_data/<code>")
 def api_stock_data(code: str):
     cfg = current_app.config
-    parquet_file = cfg["PARQUET_FILE"]
     output_dir = cfg["OUTPUT_DIR"]
-    meta_file = cfg["META_FILE"]
     try:
-        if not os.path.exists(parquet_file):
-            return jsonify({"success": False, "error": "Data file not found"})
-
         end_date = datetime.now()
         start_date = end_date - timedelta(days=180)
-
-        cols = ["ts_code", "trade_date", "open", "close", "high", "low", "vol"]
-        df = pd.read_parquet(parquet_file, columns=cols)
+        gateway = AShareMarketDataGateway(cfg.get("ASHARE_DATA_ROOT") or None)
+        df = gateway.load_bars(start_date, end_date)
         norm_code = str(code).strip().split(".")[0].zfill(6)
-        ts = df["ts_code"].astype(str).str.split(".").str[0].str.zfill(6)
+        ts = df["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).fillna("").str.zfill(6)
         df = df[ts == norm_code]
         if df.empty:
             return jsonify({"success": False, "error": "Stock not found"})
 
-        df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str))
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
         df = df[df["trade_date"] >= start_date].sort_values("trade_date")
 
         data = {
@@ -620,7 +541,11 @@ def api_stock_data(code: str):
                 related_trades = sub[keep].to_dict("records")
 
         latest = df.iloc[-1]
-        name_map = _build_stock_name_map(meta_file)
+        metadata = gateway.load_stock_info(latest["trade_date"])
+        name_map = {
+            str(ts_code).split(".")[0].zfill(6): str(name)
+            for ts_code, name in metadata[["ts_code", "name"]].itertuples(index=False, name=None)
+        } if {"ts_code", "name"}.issubset(metadata.columns) else {}
         snapshot = {
             "code": norm_code,
             "name": name_map.get(norm_code, norm_code),

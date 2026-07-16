@@ -101,9 +101,9 @@ class PathConfig:
     # 核心模块目录
     CORE_DIR = BASE_DIR / "core"
     
-    # 数据文件
-    PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
-    META_FILE = DATA_DIR / "stock_info.csv"
+    # 共享只读数据根目录。市场数据必须经 core.data.market_data_gateway 读取，
+    # 不在此保留可写本地行情文件路径，避免消费者回退到旧缓存。
+    ASHARE_DATA_ROOT = Path(os.environ.get("ASHARE_DATA_ROOT", "/Users/max/Data/ashare-source-data"))
     
     # 确保目录存在
     @classmethod

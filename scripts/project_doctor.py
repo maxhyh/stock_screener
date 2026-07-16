@@ -11,8 +11,13 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import sys
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_FILE = BASE_DIR / "data" / "daily_all_5y.parquet"
+sys.path.insert(0, str(BASE_DIR))
+
+from core.data.market_data_gateway import AShareMarketDataGateway
+
 MODEL_DIR = BASE_DIR / "models"
 OUTPUT_DIR = BASE_DIR / "output"
 MEMORY_DIR = BASE_DIR / "memory"
@@ -20,7 +25,6 @@ MEMORY_DIR = BASE_DIR / "memory"
 REQUIRED_FILES = [
     BASE_DIR / "core" / "mfts_screener.py",
     BASE_DIR / "scripts" / "daily_all.py",
-    BASE_DIR / "scripts" / "daily_incremental_update.py",
     BASE_DIR / "scripts" / "daily_ml_select.py",
     BASE_DIR / "web" / "app.py",
     BASE_DIR / "config" / "settings.py",
@@ -49,14 +53,13 @@ def main() -> int:
         if not ok:
             failures += 1
 
-    print("\n[2] 数据文件检查")
-    if DATA_FILE.exists():
-        h = age_hours(DATA_FILE)
-        print(f"- data/daily_all_5y.parquet: OK (age={h:.1f}h)")
-        if h > 72:
-            print("  警告: 数据超过 72 小时未更新")
+    print("\n[2] 共享 ODS 数据检查")
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if sessions:
+        print(f"- shared ODS daily_bars: OK (latest={sessions[-1]}, sessions={len(sessions)})")
     else:
-        print("- data/daily_all_5y.parquet: FAIL")
+        print("- shared ODS daily_bars: FAIL")
         failures += 1
 
     print("\n[3] 模型文件检查")

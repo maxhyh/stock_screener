@@ -36,10 +36,10 @@ sys.path.insert(0, BASE_DIR)
 
 from utils.code_utils import normalize_ts_code_series
 from utils.output_paths import ensure_output_dirs, resolve_file
+from core.data.market_data_gateway import AShareMarketDataGateway
 
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-DATA_DIR = os.path.join(BASE_DIR, "data")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ def check_retrain_triggers(
 # ──────────────────────────────────────────────────────────────────
 
 def analyze_ic_decay(
-    parquet_file: str | None = None,
+    market_file: str | None = None,
     horizons: list[int] | None = None,
     batch_size: int = 200,
 ) -> pd.DataFrame:
@@ -162,7 +162,6 @@ def analyze_ic_decay(
     sys.path.insert(0, os.path.join(BASE_DIR, "core"))
     from mfts_screener import calc_indicators
 
-    parquet_file = parquet_file or os.path.join(DATA_DIR, "daily_all_5y.parquet")
     horizons = horizons or [1, 3, 5, 8, 10, 15, 20]
 
     FACTORS = {
@@ -171,9 +170,16 @@ def analyze_ic_decay(
         "BB Position": "bb_pos", "ADX": "adx",
     }
 
-    print("加载数据...")
+    print("从共享只读 ODS 加载数据...")
     cols = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount", "pct_chg"]
-    df = pd.read_parquet(parquet_file, columns=cols)
+    if market_file:
+        df = pd.read_parquet(market_file, columns=cols)
+    else:
+        gateway = AShareMarketDataGateway()
+        sessions = gateway.available_trade_dates(start="2020-01-01")
+        if not sessions:
+            raise RuntimeError("共享 ODS 没有可用于 IC 衰减分析的日线会话")
+        df = gateway.load_bars("2020-01-01", sessions[-1], include_bj9=False)[cols].copy()
     df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str))
     df["ts_code"] = normalize_ts_code_series(df["ts_code"])
     df = df[df["trade_date"] >= "2020-01-01"].copy()  # 近几年即可

@@ -155,7 +155,7 @@ def api_ml_results_combined():
                 req_date -= timedelta(days=req_date.weekday() - 4)
             date_param = req_date.strftime("%Y%m%d")
 
-    results = load_ml_results(cfg["OUTPUT_DIR"], cfg["META_FILE"], date_param, logger=logger)
+    results = load_ml_results(cfg["OUTPUT_DIR"], cfg.get("ASHARE_DATA_ROOT") or None, date_param, logger=logger)
 
     if results:
         codes = [r["代码"] for r in results]
@@ -166,7 +166,7 @@ def api_ml_results_combined():
                 result_date = req_date if req_date else datetime.now()
         else:
             result_date = req_date if req_date else datetime.now()
-        verification = get_verification_data(codes, result_date, cfg["PARQUET_FILE"], logger=logger)
+        verification = get_verification_data(codes, result_date, cfg.get("ASHARE_DATA_ROOT") or None, logger=logger)
     else:
         verification = {}
 

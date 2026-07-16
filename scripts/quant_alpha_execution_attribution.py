@@ -24,12 +24,16 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR))
 
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series
+from core.data import AShareMarketDataGateway
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 
-DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
 BACKTEST_DIR = OUTPUT_DIR / "backtest"
 EXEC_DIR = OUTPUT_DIR / "execution"
-PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
+# Transitional compatibility export for downstream diagnostics. It deliberately
+# has no legacy-file default; callers must pass a file explicitly or migrate to
+# the ODS-loading helper in this module.
+PARQUET_FILE: Path | None = None
 
 
 def _safe_float(v: object, default: float = 0.0) -> float:
@@ -81,26 +85,8 @@ def _discover_daily_paths(raw_glob: str) -> list[Path]:
     return [by_date[k] for k in sorted(by_date)]
 
 
-def _load_industry_map() -> dict[str, str]:
-    for fp in [DATA_DIR / "stock_info.csv", DATA_DIR / "stock_metadata.csv", DATA_DIR / "stock_basic.csv"]:
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype={"ts_code": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if not code_col or not ind_col:
-            continue
-        work = df[[code_col, ind_col]].copy()
-        work["code"] = normalize_ts_code_series(work[code_col])
-        work = work[work["code"] != ""].copy()
-        work["industry"] = work[ind_col].astype(str).fillna("").str.strip().replace({"nan": "", "None": ""})
-        return dict(zip(work["code"], work["industry"]))
-    return {}
+def _load_industry_map(asof_date: object) -> dict[str, str]:
+    return load_ods_industry_map(asof_date=asof_date)
 
 
 def _normalize_daily_frame(fp: Path) -> pd.DataFrame:
@@ -164,6 +150,25 @@ def _load_market_bars(path: Path) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["trade_date", "code", "open"]).sort_values(["code", "trade_date"]).reset_index(drop=True)
     return df
+
+
+def _load_ods_market_bars(daily: pd.DataFrame, forward_days: int) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Load a bounded ODS window covering signal dates and forward labels."""
+    start = pd.Timestamp(daily["signal_date"].min()).normalize()
+    end = pd.Timestamp(daily["signal_date"].max()).normalize()
+    bars = AShareMarketDataGateway().load_bars(
+        start,
+        end,
+        forward_sessions=max(1, int(forward_days) + 1),
+    )
+    if bars.empty:
+        return pd.DataFrame(), dict(bars.attrs.get("market_data_lineage", {}))
+    bars["code"] = normalize_ts_code_series(bars["ts_code"])
+    bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce").dt.normalize()
+    for c in ["open", "close", "amount"]:
+        bars[c] = pd.to_numeric(bars[c], errors="coerce")
+    bars = bars.dropna(subset=["trade_date", "code", "open"]).sort_values(["code", "trade_date"]).reset_index(drop=True)
+    return bars, dict(bars.attrs.get("market_data_lineage", {}))
 
 
 def _attach_forward_returns(daily: pd.DataFrame, bars: pd.DataFrame, default_horizon: int) -> pd.DataFrame:
@@ -469,7 +474,7 @@ def _segment_rows(
 def build_attribution(
     *,
     daily_glob: str = "",
-    market_file: Path = PARQUET_FILE,
+    market_file: Path | None = None,
     start: str = "",
     end: str = "",
     forward_days: int = 8,
@@ -481,9 +486,13 @@ def build_attribution(
     daily = _load_daily_recommendations(daily_paths, start=start, end=end)
     if daily.empty:
         raise RuntimeError("未找到可用 daily recommendation 文件")
-    bars = _load_market_bars(market_file)
+    if market_file is not None:
+        bars = _load_market_bars(market_file)
+        market_lineage: dict[str, object] = {"data_source": "explicit_market_file", "path": str(market_file)}
+    else:
+        bars, market_lineage = _load_ods_market_bars(daily, forward_days)
     daily = _attach_forward_returns(daily, bars, default_horizon=forward_days)
-    industry_map = _load_industry_map()
+    industry_map = _load_industry_map(daily["signal_date"].max())
     daily["industry"] = daily["code"].map(industry_map).fillna("未知")
     daily["amount_bucket"] = "unknown"
     amount = pd.to_numeric(daily["amount_signal"], errors="coerce")
@@ -536,6 +545,7 @@ def build_attribution(
         "top_n": int(top_n),
         "risk_artifact_dates": int(len(blocked_by_date)),
         "p2_fill_artifact_dates": int(len(filled_by_date)),
+        "market_data": market_lineage,
         "limitation": (
             "raw_ml_top/quality_gate/refactor are computed from persisted daily recommendation rows; "
             "they are not a full-universe raw prediction reconstruction unless upstream artifacts contain those rows."
@@ -547,7 +557,7 @@ def build_attribution(
 def main() -> int:
     p = argparse.ArgumentParser(description="Alpha-to-execution attribution diagnostics")
     p.add_argument("--daily-glob", type=str, default="", help="daily recommendation CSV glob(s), comma separated")
-    p.add_argument("--market-file", type=str, default=str(PARQUET_FILE), help="market parquet file")
+    p.add_argument("--market-file", type=str, default="", help="optional explicit market parquet; default is shared ODS")
     p.add_argument("--start", type=str, default="", help="signal start date")
     p.add_argument("--end", type=str, default="", help="signal end date")
     p.add_argument("--forward-days", type=int, default=8, help="default forward open-to-open horizon")
@@ -559,7 +569,7 @@ def main() -> int:
 
     out, meta = build_attribution(
         daily_glob=args.daily_glob,
-        market_file=Path(args.market_file).resolve(),
+        market_file=Path(args.market_file).resolve() if args.market_file else None,
         start=args.start,
         end=args.end,
         forward_days=max(1, int(args.forward_days)),

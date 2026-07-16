@@ -7,8 +7,11 @@ import importlib
 
 import pandas as pd
 
+import core.execution.paper_broker as paper_broker
 import core.mfts_screener as screener
+import core.risk.pretrade as pretrade
 import scripts.quant_portfolio_backtest as qpb
+import scripts.quant_p2_paper_trade as p2_script
 from config.settings import resolve_default_label_horizon
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series
 
@@ -31,16 +34,22 @@ def test_normalize_ts_code_series_keeps_invalid_as_empty():
     assert out.iloc[4] == ""
 
 
-def test_load_metadata_normalizes_code_keys(monkeypatch, tmp_path):
-    p = tmp_path / "stock_info.csv"
-    pd.DataFrame(
-        {
-            "ts_code": ["sz000001", "000002.SZ", "bj920000"],
-            "name": ["平安银行", "万科A", "北交测试"],
-            "industry": ["银行", "地产", ""],
-        }
-    ).to_csv(p, index=False, encoding="utf-8")
-    monkeypatch.setattr(screener, "META_FILE", str(p))
+def test_load_metadata_normalizes_code_keys(monkeypatch):
+    class FakeGateway:
+        def available_trade_dates(self):
+            return ["2026-04-08"]
+
+        def load_stock_info(self, _asof_date, *, include_bj9):
+            assert include_bj9 is True
+            return pd.DataFrame(
+                {
+                    "ts_code": ["sz000001", "000002.SZ", "bj920000"],
+                    "name": ["平安银行", "万科A", "北交测试"],
+                    "industry": ["银行", "地产", ""],
+                }
+            )
+
+    monkeypatch.setattr(screener, "AShareMarketDataGateway", lambda: FakeGateway())
 
     meta = screener.load_metadata()
     assert "000001" in meta
@@ -49,22 +58,59 @@ def test_load_metadata_normalizes_code_keys(monkeypatch, tmp_path):
     assert meta["000001"]["name"] == "平安银行"
 
 
-def test_industry_map_supports_prefixed_codes(monkeypatch, tmp_path):
-    data_dir = tmp_path
-    p = data_dir / "stock_info.csv"
-    pd.DataFrame(
-        {
-            "ts_code": ["sz000001", "sh600000", "bj920000"],
-            "industry": ["银行", "非银金融", None],
-        }
-    ).to_csv(p, index=False, encoding="utf-8")
+def test_load_metadata_reads_ods_asof_snapshot(monkeypatch):
+    class FakeGateway:
+        def available_trade_dates(self):
+            return ["2026-04-08"]
 
-    monkeypatch.setattr(qpb, "DATA_DIR", str(data_dir))
-    ind_map = qpb._load_industry_map()
+        def load_stock_info(self, asof_date, *, include_bj9):
+            assert str(asof_date).startswith("2026-04-08")
+            assert include_bj9 is True
+            return pd.DataFrame(
+                {
+                    "ts_code": ["sz000001", "000002.SZ"],
+                    "name": ["平安银行", "万科A"],
+                    "industry": ["银行", "地产"],
+                }
+            )
+
+    monkeypatch.setattr(screener, "AShareMarketDataGateway", lambda: FakeGateway(), raising=False)
+
+    meta = screener.load_metadata("2026-04-08")
+
+    assert meta["000001"] == {"name": "平安银行", "industry": "银行"}
+
+
+def test_backtest_industry_map_delegates_to_ods(monkeypatch):
+    seen = {}
+
+    def fake_load_industry_map(*, asof_date=None):
+        seen["asof_date"] = asof_date
+        return {"000001": "银行", "600000": "非银金融"}
+
+    monkeypatch.setattr(qpb, "load_ods_industry_map", fake_load_industry_map)
+    ind_map = qpb._load_industry_map("2026-04-08")
 
     assert ind_map.get("000001") == "银行"
     assert ind_map.get("600000") == "非银金融"
-    assert ind_map.get("920000", "") == ""
+    assert seen["asof_date"] == "2026-04-08"
+
+
+def test_pretrade_industry_map_reads_ods_metadata(monkeypatch):
+    class FakeGateway:
+        def available_trade_dates(self):
+            return ["2026-04-08"]
+
+        def load_stock_info(self, asof_date, *, include_bj9):
+            assert str(asof_date).startswith("2026-04-08")
+            assert include_bj9 is True
+            return pd.DataFrame({"ts_code": ["sz000001", "sh600000"], "industry": ["银行", "非银金融"]})
+
+    monkeypatch.setattr(pretrade, "AShareMarketDataGateway", lambda: FakeGateway(), raising=False)
+
+    ind_map = pretrade.load_industry_map(asof_date="2026-04-08")
+
+    assert ind_map == {"000001": "银行", "600000": "非银金融"}
 
 
 def test_daily_verify_defaults_align_profile(monkeypatch):
@@ -86,3 +132,20 @@ def test_exec_constraints_limit_lock_behavior():
     assert qpb._can_enter_long(lock_up, "000001", "平安银行") is False
     assert qpb._can_exit_long(lock_down, "000001", "平安银行") is False
     assert qpb._can_exit_long(normal, "000001", "平安银行") is True
+
+
+def test_missing_volume_with_positive_amount_is_tradable():
+    normal_missing_vol = pd.Series(
+        {
+            "prev_close": 10.0,
+            "open": 10.2,
+            "high": 10.5,
+            "low": 10.1,
+            "vol": float("nan"),
+            "amount": 100000.0,
+        }
+    )
+
+    assert paper_broker._can_enter(normal_missing_vol, "000001", "平安银行") is True
+    assert p2_script._can_enter(normal_missing_vol, "000001", "平安银行") is True
+    assert qpb._can_enter_long(normal_missing_vol, "000001", "平安银行") is True

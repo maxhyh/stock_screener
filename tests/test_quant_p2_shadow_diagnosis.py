@@ -53,10 +53,6 @@ def test_summarize_adv_risk_counts_adv_hits(tmp_path, monkeypatch):
 def test_summarize_industry_concentration_uses_run_positions(tmp_path, monkeypatch):
     exec_dir = tmp_path / "execution"
     exec_dir.mkdir()
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    parquet_file = data_dir / "daily_all_5y.parquet"
-
     payload = {
         "last_trade_date": "2026-04-10",
         "nav": 2000.0,
@@ -66,15 +62,20 @@ def test_summarize_industry_concentration_uses_run_positions(tmp_path, monkeypat
         },
     }
     (exec_dir / "shadow_run_20260410_x.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    pd.DataFrame(
-        [
-            {"ts_code": "000001.SZ", "trade_date": "20260410", "close": 10.0},
-            {"ts_code": "000002.SZ", "trade_date": "20260410", "close": 5.0},
-        ]
-    ).to_parquet(parquet_file, index=False)
-
     monkeypatch.setattr(diag, "EXEC_DIR", exec_dir)
-    monkeypatch.setattr(diag, "PARQUET_FILE", parquet_file)
+
+    class _Gateway:
+        def load_bars(self, start, end):
+            assert start == "2026-04-10"
+            assert end == "2026-04-10"
+            return pd.DataFrame(
+                [
+                    {"ts_code": "000001.SZ", "trade_date": "20260410", "close": 10.0},
+                    {"ts_code": "000002.SZ", "trade_date": "20260410", "close": 5.0},
+                ]
+            )
+
+    monkeypatch.setattr(diag, "AShareMarketDataGateway", _Gateway)
 
     industry_map = {"000001": "银行", "000002": "医药"}
     out = diag._summarize_industry_concentration("shadow", industry_map)

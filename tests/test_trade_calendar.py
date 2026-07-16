@@ -29,18 +29,19 @@ def test_nearest_trade_day_on_or_before_skips_holiday_with_known_dates():
     assert out == dt.date(2026, 4, 3)
 
 
-def test_daily_all_get_auto_target_date_uses_trade_calendar_helper(monkeypatch):
+def test_daily_all_get_auto_target_date_uses_ods_sessions(monkeypatch):
     class _FakeDateTime:
         @classmethod
         def now(cls):
             return dt.datetime(2026, 4, 6, 19, 0, 0)  # 节假日周一晚间
 
     monkeypatch.setattr(daily_all, "datetime", _FakeDateTime)
-    monkeypatch.setattr(
-        daily_all,
-        "nearest_trade_day_on_or_before",
-        lambda target, parquet_file=None: dt.date(2026, 4, 3),
-    )
+    class _Gateway:
+        def available_trade_dates(self, *, end=None):
+            assert end == "2026-04-06"
+            return ["2026-04-03"]
+
+    monkeypatch.setattr(daily_all, "AShareMarketDataGateway", _Gateway)
     assert daily_all.get_auto_target_date() == "20260403"
 
 

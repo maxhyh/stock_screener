@@ -7,13 +7,12 @@ import argparse
 import os
 import sys
 
-import pandas as pd
-
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "core"))
 
 from core.platform.profiling import profile_call
+from core.data.market_data_gateway import AShareMarketDataGateway
 from mfts_screener import calc_indicators
 
 
@@ -23,13 +22,13 @@ def main() -> int:
     parser.add_argument("--iterations", type=int, default=1, help="重复次数")
     args = parser.parse_args()
 
-    parquet_file = os.path.join(BASE_DIR, "data", "daily_all_5y.parquet")
-    if not os.path.exists(parquet_file):
-        print(f"❌ 数据文件不存在: {parquet_file}")
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
+        print("❌ 共享 ODS 没有可用日线会话")
         return 1
-
-    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount", "pct_chg"]
-    df = pd.read_parquet(parquet_file, columns=cols)
+    start = sessions[max(0, len(sessions) - 300)]
+    df = gateway.load_bars(start, sessions[-1], include_bj9=False)
     codes = sorted(df["ts_code"].astype(str).unique().tolist())[: max(int(args.stocks), 1)]
     sample = df[df["ts_code"].astype(str).isin(codes)].copy().sort_values(["ts_code", "trade_date"])
     result = profile_call("calc_indicators", calc_indicators, sample, iterations=max(int(args.iterations), 1))

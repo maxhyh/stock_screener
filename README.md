@@ -1,11 +1,12 @@
-# MFTS 智能选股系统
+# A 股量化选股与纸面执行平台
 
-> **Multi-Factor Timing System v6.1** - A股多因子量化选股系统
+> 从 MFTS 多因子选股演进而来的 A 股日频量化研究、回测、P2 纸面执行、shadow 诊断和 profile promotion 治理平台。
 
 ## 快速导航
 
 - 日常生产入口：`python scripts/daily_all.py`
-- 单独数据更新：`python scripts/daily_incremental_update.py`
+- 一键启动前端：`scripts/start_web.sh`
+- 数据可用性检查：`python scripts/project_doctor.py`
 - 单独 ML 推荐：`python scripts/daily_ml_select.py`
 - 规则扫描：`python core/mfts_screener.py`
 - Web 查看：`python web/app.py`
@@ -16,8 +17,10 @@
 - 代码结构索引：`docs/PROJECT_INDEX.md`
 - 专家审查简报：`docs/EXPERT_REVIEW_BRIEF.md`
 - 专家审查提示词：`docs/EXPERT_REVIEW_PROMPT.md`
+- 文档与 Skill 体系审查：`docs/DOCUMENTATION_AND_SKILLS.md`
 - 操作流程：`docs/WORKFLOW.md`
 - 脚本分层：`scripts/README.md`
+- Codex 工程纪律：`skills/audit-a-share-quant-project/references/codex-engineering-discipline.md`
 
 已退出主维护面的旧脚本实现已移入 `archive/scripts/`，避免与当前生产入口混在一起。
 
@@ -35,11 +38,11 @@
 
 当前 Git 仓库只跟踪源码、配置、schema、测试、文档和记忆系统。`data/` 大型行情文件、`output/` 回测与 P2 流水、`logs/` 日志、`models/*.pkl` 模型二进制均为本地运行产物，不随审查快照提交。
 
-当前默认档仍是 `quality_regime`。v9 `quality_regime_candidate_v9_exec_state` 只是 shadow 档，目标是 capacity-safe reserve 上游生成和 blocked-order 状态机，不代表已通过 promotion。
+当前默认档仍是 `quality_regime`。v7-v26 等候选档都只是 shadow/diagnostic 档，不代表已通过 promotion。近期结论是：执行可信链路持续提升，但收益仍未稳定穿透到 P2 执行层；不要把低仓位、空池、强风控导致的低回撤解释为 alpha。v24 条件化 holiday-gap cap 覆盖率通过但 score-alpha gate 失败；v25 liquidity target score 的 60 日 P2 改善主要来自低仓少亏；v26 修复 style 口径和 capacity fallback 后被加硬 score-alpha gate 拒绝。最新状态以 `config/quant_live_profiles.json`、最新 P2/shadow/promotion artifacts、`memory/actives.md` 和 `memory/errors.md` 为准。
 
 ## 📖 项目简介
 
-本项目将 TradingView 的 MFTS v6.1 指标完整复刻为 Python 版本，用于 A股市场的批量自动化选股。
+本项目起源于 TradingView MFTS v6.1 指标的 Python 复刻，但当前重点已经扩展为 A 股日频量化平台：研究信号、组合构建、回测、P2 纸面执行、执行一致性诊断、promotion gate 和自我记忆演化。
 
 ## 当前建议认知方式
 
@@ -80,10 +83,9 @@ stock_screener/
 │   ├── train_mfts_lgbm.py        # LightGBM训练
 │   └── ...                       # 更多脚本
 │
-├── data/                          # 数据目录
-│   ├── download_5y_data.py       # AKShare 数据下载
-│   ├── daily_all_5y.parquet      # 5年历史数据
-│   └── stock_info.csv            # 股票元数据
+├── core/data/                     # 共享只读 ODS 数据入口
+│   ├── ashare_ods_loader.py      # 分区/快照适配器
+│   └── market_data_gateway.py    # 市场数据与执行窗口
 │
 ├── web/                           # Web 服务
 │   ├── app.py                    # Flask API
@@ -112,19 +114,40 @@ stock_screener/
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 1. 进入默认虚拟环境
+
+本项目默认使用 Conda 环境 `stock`，所有运行、测试和证据生成应使用同一环境：
+
+```bash
+conda activate stock
+python --version
+```
+
+非交互命令可使用：
+
+```bash
+conda run -n stock python scripts/project_doctor.py
+```
+
+当前工作站的默认解释器路径为 `/opt/homebrew/Caskroom/miniforge/base/envs/stock/bin/python`，前端启动脚本会默认使用该路径，也可通过 `MFTS_PYTHON` 显式覆盖。
+
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 下载数据 (首次运行)
+### 3. 配置共享只读数据源
 
 ```bash
-python data/download_5y_data.py
+export ASHARE_DATA_ROOT=/Users/max/Data/ashare-source-data
+python scripts/project_doctor.py
 ```
 
-### 3. 运行选股
+项目不会下载、补数、修复或写入该数据源。旧本地缓存的退役边界见
+`docs/LEGACY_DATA_RETIREMENT.md`。
+
+### 4. 运行选股
 
 ```bash
 python core/mfts_screener.py
@@ -132,7 +155,7 @@ python core/mfts_screener.py
 python core/mfts_screener.py --date 20260320
 ```
 
-### 3.1 一键更新模式（支持隔几天更新）
+### 4.1 一键更新模式（支持隔几天更新）
 
 ```bash
 # 默认：补齐最近缺口（推荐）
@@ -150,7 +173,7 @@ python scripts/daily_all.py --mode latest
 # 收盘前自动回退上一交易日（默认阈值 18:00，可调）
 MFTS_AUTO_TARGET_CUTOFF_HOUR=18 python scripts/daily_all.py --mode latest
 
-# 说明：若主数据已覆盖目标日，latest 模式会自动跳过增量下载，避免重复补数
+# 说明：若共享 ODS 未覆盖目标日，latest 模式会停止并报告 data_availability
 
 # 只做验证补齐
 python scripts/daily_all.py --mode verify-only --catchup-days 10
@@ -158,16 +181,22 @@ python scripts/daily_all.py --mode verify-only --catchup-days 10
 # 单独验证可执行口径（默认 open_to_close_t1）
 python scripts/daily_verify.py --date 20260320 --label-mode open_to_close_t1
 
-# 与交易系统一致的验证口径（推荐，默认档位 balanced=3天）
-python scripts/daily_verify.py --date 20260320 --label-mode open_to_open --label-horizon 3
+# 与交易系统一致的验证口径（推荐，当前 default_profile=quality_regime，holding_days=8）
+python scripts/daily_verify.py --date 20260320 --label-mode open_to_open --label-horizon 8
 
-# 数据更新覆盖门禁（默认 MFTS_MIN_DAILY_COVERAGE=3000）
-MFTS_MIN_DAILY_COVERAGE=3000 python scripts/daily_incremental_update.py --target-date 20260320
+# 数据覆盖由外部供应链维护；本项目只校验并读取 ODS
+python scripts/project_doctor.py
 ```
 
 ### 4. 查看结果
 
 **方式一**: 启动 Flask 服务
+```bash
+scripts/start_web.sh
+# 访问 http://127.0.0.1:5001
+```
+
+或手动启动：
 ```bash
 python web/app.py
 # 访问 http://localhost:5001
@@ -217,9 +246,9 @@ python scripts/build_benchmark_hs300.py --start-date 20100101
 python scripts/daily_all.py --mode catchup --rebuild-days 120 --stage-min-stocks 3000 --verify-min-stocks 3000
 
 # 组合交易回测（把“选股”转为“可交易组合”，默认实盘参数）
-# 默认参数读取自 config/quant_live_profiles.json 的 default_profile（当前 balanced）
-# 当前默认（balanced）：TopN=10, Hold=3, MaxSinglePos=0.06, use_regime_position=False
-# 最新优化推荐（2026-04-10，严格门槛）：TopN=8, Hold=8, MaxSinglePos=0.04, use_regime_position=True
+# 默认参数读取自 config/quant_live_profiles.json 的 default_profile（当前 quality_regime）
+# 当前默认（quality_regime）：TopN=13, Hold=8, MaxSinglePos=0.04, fallback_total_position=0.60
+# balanced / balanced_regime / balanced_h8 仍保留为历史对照档，不是当前默认档
 # 默认排除：北交所 9 开头代码（不参与选股/回测）
 python scripts/quant_portfolio_backtest.py --start 2025-01-01 --end 2026-03-20
 
@@ -343,17 +372,20 @@ python scripts/quant_signal_refactor_compare.py \
   --engine-mode hybrid --benchmark-mode hs300 \
   --stability-blend 0.20 --min-refactor-score 0.45
 
-# 新增：按实盘参数档位一键运行（配置文件: config/quant_live_profiles.json）
-python scripts/run_quant_profile.py --profile balanced --start 2025-01-01 --end 2026-03-20
-python scripts/run_quant_profile.py --profile balanced_regime --start 2025-01-01 --end 2026-03-20
+# 新增：按配置档位一键运行（配置文件: config/quant_live_profiles.json）
+python scripts/run_quant_profile.py --profile quality_regime --start 2025-01-01 --end 2026-03-20
+python scripts/run_quant_profile.py --profile quality_regime_candidate_v18_balanced_trap_guard --start 2025-01-01 --end 2026-03-20
+python scripts/run_quant_profile.py --profile quality_regime_candidate_v23_nav_weighted_style_gate --start 2025-01-01 --end 2026-03-20
+
+# 历史对照档仍可运行，但不能视为当前默认档
 python scripts/run_quant_profile.py --profile balanced_h8 --start 2025-01-01 --end 2026-03-20
 python scripts/run_quant_profile.py --profile right_h8_low_turnover --start 2025-01-01 --end 2026-03-20
 
-# 新增：A/B 对比（默认 balanced vs balanced_regime）
+# 新增：A/B 对比（示例：主档 vs shadow 诊断档）
 python scripts/quant_profile_ab_compare.py --start 2025-01-01 --end 2026-03-20
 
-# 新增：一次输出三组对比（H=3、H=3+regime、H=8）
-python scripts/quant_profile_ab_compare.py --base-profile balanced --compare-profile balanced_regime --extra-profiles balanced_h8 --start 2025-01-01 --end 2026-03-20
+# 新增：一次输出多组对比
+python scripts/quant_profile_ab_compare.py --base-profile quality_regime --compare-profile quality_regime_candidate_v18_balanced_trap_guard --extra-profiles quality_regime_candidate_v23_nav_weighted_style_gate --start 2025-01-01 --end 2026-03-20
 ```
 
 输出文件：
@@ -391,8 +423,8 @@ python scripts/daily_all.py --mode latest --with-p1 --with-p2 --with-p3-consiste
 python scripts/daily_all.py --mode latest --with-p2 --with-p3-consistency --min-industry-coverage-pct 80
 python scripts/daily_all.py --mode latest --with-p2 --with-p3-consistency --disable-industry-coverage-gate
 
-# 元数据行业覆盖手动刷新（排障）
-python -c "import scripts.daily_incremental_update as m; m.refresh_stock_metadata()"
+# 元数据行业覆盖检查（排障）
+python scripts/project_doctor.py
 
 # 单独执行 P1（风险暴露/归因/容量）
 python scripts/quant_p1_analytics.py --write-latest
@@ -513,27 +545,13 @@ python scripts/fix_volume_unit_by_date.py --date 20260319 --apply
 
 ### 10. 数据源故障排查（实盘常见）
 
-当出现如下报错时：
-- `Can not decode value starting with character '<'`（新浪）
-- `Server disconnected`（东方财富）
-
-通常是数据源临时限流/网关异常，而不是策略逻辑错误。建议流程：
+当共享 ODS 未覆盖目标交易日时，通常是外部数据供应链延迟，而不是策略逻辑错误。建议流程：
 
 ```bash
-# 1) 快速自检两路批量接口
-python - <<'PY'
-import akshare as ak
-for name, fn in [("sina", ak.stock_zh_a_spot), ("eastmoney", ak.stock_zh_a_spot_em)]:
-    try:
-        print(name, "ok", fn().shape)
-    except Exception as e:
-        print(name, "fail", str(e)[:120])
-PY
+# 1) 检查共享只读 ODS
+python scripts/project_doctor.py
 
-# 2) 仅补失败日期（避免重跑全流程）
-python scripts/daily_incremental_update.py --target-date 20260325
-
-# 3) 成功后再跑一键流程
+# 2) 覆盖恢复后再跑一键流程
 python scripts/daily_all.py --mode catchup --catchup-days 2 --stage-min-stocks 3000 --verify-min-stocks 3000
 ```
 
@@ -572,7 +590,7 @@ python scripts/daily_all.py --mode catchup --catchup-days 2 --stage-min-stocks 3
 ## 更多文档
 
 ### 核心文档
-- [信号逻辑说明](docs/SIGNAL_LOGIC.md) - MFTS v6.1详细逻辑
+- [信号逻辑说明](docs/SIGNAL_LOGIC.md) - MFTS 规则与信号逻辑
 - [本地运行指南](docs/LOCAL_GUIDE.md) - 本地环境与启动流程
 - [部署文档](docs/DEPLOYMENT.md) - 本地部署与服务化
 - [项目索引](docs/PROJECT_INDEX.md) - 目录职责、脚本分层与整理建议
@@ -591,9 +609,9 @@ stock_screener/
 ├── core/
 │   ├── mfts_screener.py         # MFTS核心算法
 │   └── mfts_screener_v62.py     # v6.2优化版
-├── data/
-│   ├── download_5y_data.py      # AKShare数据下载
-│   └── daily_all_5y.parquet     # 5年市场数据
+├── core/data/
+│   ├── ashare_ods_loader.py     # 共享 ODS 分区/快照适配器
+│   └── market_data_gateway.py   # 共享 ODS 市场数据入口
 ├── scripts/
 │   ├── daily_mfts_select.py     # 纯MFTS选股
 │   ├── daily_ml_select.py       # ML增强选股
@@ -605,7 +623,7 @@ stock_screener/
 │   ├── run_quant_profile.py     # 按档位运行回测（新增）
 │   ├── quant_profile_ab_compare.py # 档位A/B对比（新增）
 │   ├── train_mfts_lgbm.py       # LightGBM训练
-│   ├── daily_incremental_update.py # 增量更新
+│   ├── project_doctor.py       # ODS 健康检查
 │   ├── research/                # 研究脚本
 │   └── history/                 # 历史生成/旧回测
 ├── models/
@@ -676,7 +694,7 @@ cat output/factor_ic_analysis_T1.csv
 # 训练LightGBM模型
 python scripts/train_mfts_lgbm.py
 
-# 推荐：与实盘执行对齐（默认读取 default_profile.holding_days，当前=3）
+# 推荐：与实盘执行对齐（默认读取 default_profile.holding_days，当前=8）
 python scripts/train_mfts_lgbm.py --label-mode open_to_open
 
 # A/B 对照：同配置下切换 H=3 / H=8

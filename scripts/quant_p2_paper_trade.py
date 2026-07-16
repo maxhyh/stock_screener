@@ -41,16 +41,17 @@ from core.platform import (
 )
 from core.execution import create_broker
 from core.execution.paper_broker import PaperBroker
+from core.data.market_data_gateway import load_execution_bars
 from core.risk import PreTradeRiskConfig, apply_pretrade_risk_gates, load_industry_map
 from core.risk.pretrade import _load_blacklist
 from utils.code_utils import limit_ratio_for_stock, normalize_ts_code, normalize_ts_code_series
-from utils.metadata_guard import evaluate_metadata_guard, load_metadata_health
+from utils.market_data_units import normalize_amount_volume_units
+from utils.metadata_guard import evaluate_metadata_guard, load_ods_metadata_health
 from utils.output_paths import get_output_dirs, list_dual
 
 OUTPUT_DIR = Path(BASE_DIR) / "output"
-DATA_DIR = Path(BASE_DIR) / "data"
-PARQUET_FILE = DATA_DIR / "daily_all_5y.parquet"
 PROFILE_FILE = Path(BASE_DIR) / "config" / "quant_live_profiles.json"
+_BARS_CACHE: dict[tuple[str, str, bool], pd.DataFrame] | None = None
 
 
 def _log(msg: str) -> None:
@@ -73,12 +74,17 @@ def _load_default_profile_values() -> dict[str, float]:
         "risk_max_style_beta_exposure_abs": 0.0,
         "risk_max_style_momentum_exposure_abs": 0.0,
         "risk_max_style_vol_exposure_abs": 0.0,
+        "risk_style_exposure_basis": "invested_weighted",
         "risk_style_lb_short": 20,
         "risk_style_lb_beta": 60,
         "optimizer_mode": "score_weight",
         "target_capital_base": 1_000_000.0,
         "target_max_industry_weight": 0.0,
         "target_max_adv_participation": 0.0,
+        "target_max_reserve_weight": 0.0,
+        "target_max_exit_trap_weight": 0.0,
+        "target_exit_trap_risk_threshold": 0.0,
+        "target_max_exit_trap_single_weight": 0.0,
         "target_capacity_amount_col": "amount_ma20",
         "target_capacity_amount_buffer": 1.0,
         "redistribute_clipped_weight": False,
@@ -136,6 +142,9 @@ def _load_default_profile_values() -> dict[str, float]:
         defaults["risk_max_style_vol_exposure_abs"] = float(
             p.get("risk_max_style_vol_exposure_abs", defaults["risk_max_style_vol_exposure_abs"])
         )
+        defaults["risk_style_exposure_basis"] = str(
+            p.get("risk_style_exposure_basis", defaults["risk_style_exposure_basis"]) or defaults["risk_style_exposure_basis"]
+        )
         defaults["risk_style_lb_short"] = int(p.get("risk_style_lb_short", defaults["risk_style_lb_short"]))
         defaults["risk_style_lb_beta"] = int(p.get("risk_style_lb_beta", defaults["risk_style_lb_beta"]))
         defaults["optimizer_mode"] = str(p.get("optimizer_mode", defaults["optimizer_mode"]))
@@ -145,6 +154,18 @@ def _load_default_profile_values() -> dict[str, float]:
         )
         defaults["target_max_adv_participation"] = float(
             p.get("target_max_adv_participation", p.get("risk_max_adv_participation", defaults["target_max_adv_participation"]))
+        )
+        defaults["target_max_reserve_weight"] = float(
+            p.get("target_max_reserve_weight", defaults["target_max_reserve_weight"])
+        )
+        defaults["target_max_exit_trap_weight"] = float(
+            p.get("target_max_exit_trap_weight", defaults["target_max_exit_trap_weight"])
+        )
+        defaults["target_exit_trap_risk_threshold"] = float(
+            p.get("target_exit_trap_risk_threshold", defaults["target_exit_trap_risk_threshold"])
+        )
+        defaults["target_max_exit_trap_single_weight"] = float(
+            p.get("target_max_exit_trap_single_weight", defaults["target_max_exit_trap_single_weight"])
         )
         defaults["target_capacity_amount_col"] = str(
             p.get("target_capacity_amount_col", defaults["target_capacity_amount_col"]) or defaults["target_capacity_amount_col"]
@@ -253,6 +274,31 @@ def _parse_percent_text(text: object, fallback: float) -> float:
         return fallback
 
 
+def _external_target_weight_budget(signal_df: pd.DataFrame) -> dict[str, object]:
+    """Return the upstream target-weight budget embedded in a daily signal file."""
+    out: dict[str, object] = {
+        "has_external_target_weight": False,
+        "target_weight_sum": 0.0,
+        "target_weight_positive_count": 0,
+        "target_weight_max": 0.0,
+        "target_weight_checksum": "",
+    }
+    if signal_df is None or "target_weight" not in signal_df.columns:
+        return out
+    out["has_external_target_weight"] = True
+    if signal_df.empty:
+        return out
+    weights = pd.to_numeric(signal_df["target_weight"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    positive = weights[weights > 1e-12]
+    out["target_weight_sum"] = float(min(max(float(positive.sum()), 0.0), 1.0))
+    out["target_weight_positive_count"] = int(len(positive))
+    out["target_weight_max"] = float(min(max(float(positive.max()), 0.0), 1.0)) if not positive.empty else 0.0
+    if "target_weight_checksum" in signal_df.columns:
+        checksums = [str(x).strip() for x in signal_df["target_weight_checksum"].dropna().unique().tolist()]
+        out["target_weight_checksum"] = checksums[0] if checksums else ""
+    return out
+
+
 def _safe_float(v: object, default: float = 0.0) -> float:
     try:
         x = float(v)
@@ -261,6 +307,26 @@ def _safe_float(v: object, default: float = 0.0) -> float:
     except Exception:
         pass
     return float(default)
+
+
+def _signal_float_stat(signal_df: pd.DataFrame, col: str, default: float = 0.0, *, agg: str = "max") -> float:
+    if signal_df is None or signal_df.empty or col not in signal_df.columns:
+        return float(default)
+    vals = pd.to_numeric(signal_df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if vals.empty:
+        return float(default)
+    if agg == "min":
+        return float(vals.min())
+    if agg == "mean":
+        return float(vals.mean())
+    return float(vals.max())
+
+
+def _signal_text_stat(signal_df: pd.DataFrame, col: str, default: str = "") -> str:
+    if signal_df is None or signal_df.empty or col not in signal_df.columns:
+        return str(default)
+    vals = [str(x) for x in signal_df[col].dropna().astype(str).tolist() if str(x).strip()]
+    return vals[0] if vals else str(default)
 
 
 def _parse_bool_like(v: object, default: bool = False) -> bool:
@@ -389,15 +455,58 @@ def _extract_signal_date(signal_file: Path) -> pd.Timestamp:
     raise RuntimeError(f"无法从推荐文件识别日期: {signal_file}")
 
 
-def _load_signal_df(signal_file: Path, top_n: int, include_bj9: bool, exclude_st: bool) -> pd.DataFrame:
-    df = pd.read_csv(signal_file, dtype={"代码": str})
-    if df.empty or "代码" not in df.columns:
-        raise RuntimeError(f"推荐文件缺少有效数据: {signal_file}")
+def _empty_signal_frame(columns: list[str] | None = None) -> pd.DataFrame:
+    base_cols = ["代码", "名称", "ML评分", "排名_num"]
+    all_cols = list(dict.fromkeys([*(columns or []), *base_cols]))
+    return pd.DataFrame(columns=all_cols)
+
+
+def _load_signal_df_with_stats(
+    signal_file: Path,
+    top_n: int,
+    include_bj9: bool,
+    exclude_st: bool,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    stats: dict[str, object] = {
+        "raw_rows": 0,
+        "valid_code_rows": 0,
+        "filtered_bj9_rows": 0,
+        "filtered_st_rows": 0,
+        "post_filter_rows": 0,
+        "empty_signal": 0,
+        "empty_signal_reason": "",
+    }
+    try:
+        df = pd.read_csv(signal_file, dtype={"代码": str})
+    except pd.errors.EmptyDataError:
+        stats["empty_signal"] = 1
+        stats["empty_signal_reason"] = "empty_signal_raw"
+        return _empty_signal_frame(), stats
+    if "代码" not in df.columns:
+        stats["raw_rows"] = int(len(df))
+        stats["empty_signal"] = 1
+        stats["empty_signal_reason"] = "empty_signal_raw"
+        return _empty_signal_frame(list(df.columns)), stats
+
+    stats["raw_rows"] = int(len(df))
+    if df.empty:
+        stats["empty_signal"] = 1
+        stats["empty_signal_reason"] = "empty_signal_raw"
+        return _empty_signal_frame(list(df.columns)), stats
+
     work = df.copy()
     work["代码"] = normalize_ts_code_series(work["代码"])
     work = work[work["代码"] != ""].copy()
+    stats["valid_code_rows"] = int(len(work))
+    if work.empty:
+        stats["empty_signal"] = 1
+        stats["empty_signal_reason"] = "empty_signal_raw"
+        return _empty_signal_frame(list(df.columns)), stats
+
+    bj9_mask = work["代码"].astype(str).str.startswith("9")
+    stats["filtered_bj9_rows"] = int(bj9_mask.sum()) if not include_bj9 else 0
     if not include_bj9:
-        work = work[~work["代码"].astype(str).str.startswith("9")].copy()
+        work = work[~bj9_mask].copy()
     if "排名" in work.columns:
         work["排名_num"] = pd.to_numeric(work["排名"], errors="coerce")
         work = work.sort_values("排名_num")
@@ -409,8 +518,27 @@ def _load_signal_df(signal_file: Path, top_n: int, include_bj9: bool, exclude_st
     if "名称" not in work.columns:
         work["名称"] = work["代码"]
     if exclude_st:
-        work = work[~work["名称"].astype(str).str.contains("ST", case=False, na=False)].copy()
-    return work.head(max(1, top_n)).reset_index(drop=True)
+        st_mask = work["名称"].astype(str).str.contains("ST", case=False, na=False)
+        stats["filtered_st_rows"] = int(st_mask.sum())
+        work = work[~st_mask].copy()
+    stats["post_filter_rows"] = int(len(work))
+    if work.empty:
+        stats["empty_signal"] = 1
+        stats["empty_signal_reason"] = "empty_after_universe_filter"
+        return _empty_signal_frame(list(df.columns)), stats
+    return work.head(max(1, top_n)).reset_index(drop=True), stats
+
+
+def _load_signal_df(signal_file: Path, top_n: int, include_bj9: bool, exclude_st: bool) -> pd.DataFrame:
+    df, stats = _load_signal_df_with_stats(
+        signal_file,
+        top_n=top_n,
+        include_bj9=include_bj9,
+        exclude_st=exclude_st,
+    )
+    if int(stats.get("empty_signal", 0)) > 0:
+        raise RuntimeError(f"推荐文件缺少有效数据: {signal_file}; reason={stats.get('empty_signal_reason', '')}")
+    return df
 
 
 def _positive_min(values: list[float]) -> float:
@@ -536,6 +664,21 @@ def _assign_profile_target_weights(
             amount_col=amount_col,
             amount_buffer=amount_buffer,
             redistribute_clipped=_parse_bool_like(profile_cfg.get("redistribute_clipped_weight", False), default=False),
+            reserve_cap=min(max(_safe_float(profile_cfg.get("target_max_reserve_weight", 0.0), 0.0), 0.0), 1.0),
+            reserve_col="reserve_candidate",
+            exit_trap_risk_col="exit_trap_risk_score",
+            exit_trap_risk_threshold=min(
+                max(_safe_float(profile_cfg.get("target_exit_trap_risk_threshold", 0.0), 0.0), 0.0),
+                1.0,
+            ),
+            exit_trap_weight_cap=min(
+                max(_safe_float(profile_cfg.get("target_max_exit_trap_weight", 0.0), 0.0), 0.0),
+                1.0,
+            ),
+            exit_trap_single_cap=min(
+                max(_safe_float(profile_cfg.get("target_max_exit_trap_single_weight", 0.0), 0.0), 0.0),
+                1.0,
+            ),
             impact_model=str(profile_cfg.get("impact_model", "sqrt") or "sqrt"),
             impact_base_bps=max(0.0, _safe_float(profile_cfg.get("impact_base_bps", 0.0), 0.0)),
             impact_participation_bps=max(0.0, _safe_float(profile_cfg.get("impact_participation_bps", 0.0), 0.0)),
@@ -555,35 +698,27 @@ def _assign_profile_target_weights(
     return selected.reset_index(drop=True)
 
 
-def _load_bars() -> pd.DataFrame:
-    if not PARQUET_FILE.exists():
-        raise FileNotFoundError(f"未找到行情数据: {PARQUET_FILE}")
-    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"]
-    df = pd.read_parquet(PARQUET_FILE, columns=cols)
-    df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dt.normalize()
-    df["code"] = normalize_ts_code_series(df["ts_code"])
-    for c in ("open", "high", "low", "close", "vol", "amount"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["trade_date", "code"])
-    df = df[df["code"] != ""].copy()
-    df = df.sort_values(["code", "trade_date"]).reset_index(drop=True)
-    df["prev_close"] = df.groupby("code", observed=True)["close"].shift(1)
-    df["amount_ma20"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(20, min_periods=5).mean())
-        .fillna(0.0)
-    )
-    df["amount_min5"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(5, min_periods=1).min())
-        .fillna(0.0)
-    )
-    df["amount_min10"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(10, min_periods=3).min())
-        .fillna(df["amount_min5"])
-    )
-    return df
+def _load_bars(signal_date: object, end_date: object, *, include_bj9: bool = False) -> pd.DataFrame:
+    global _BARS_CACHE
+    start_key = pd.Timestamp(signal_date).strftime("%Y-%m-%d")
+    end_key = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    cache_key = (start_key, end_key, bool(include_bj9))
+    if _BARS_CACHE is None:
+        _BARS_CACHE = {}
+    if cache_key not in _BARS_CACHE:
+        frame, _, lineage = load_execution_bars(
+            start_key,
+            end_key,
+            lookback_sessions=20,
+            forward_sessions=1,
+            include_bj9=bool(include_bj9),
+        )
+        frame.attrs["market_data_lineage"] = lineage
+        _BARS_CACHE[cache_key] = frame.copy()
+        _BARS_CACHE[cache_key].attrs["market_data_lineage"] = lineage
+    out = _BARS_CACHE[cache_key].copy()
+    out.attrs["market_data_lineage"] = dict(_BARS_CACHE[cache_key].attrs.get("market_data_lineage", {}))
+    return out
 
 
 def _get_next_trade_day(trading_days: list[pd.Timestamp], signal_date: pd.Timestamp) -> pd.Timestamp | None:
@@ -611,7 +746,9 @@ def _is_suspended(row: pd.Series | None) -> bool:
     op = _safe_float(row.get("open", np.nan), np.nan)
     vol = _safe_float(row.get("vol", np.nan), np.nan)
     amt = _safe_float(row.get("amount", np.nan), np.nan)
-    return (not np.isfinite(op)) or op <= 0 or (not np.isfinite(vol)) or vol <= 0 or (not np.isfinite(amt)) or amt <= 0
+    if (not np.isfinite(op)) or op <= 0:
+        return True
+    return not ((np.isfinite(amt) and amt > 0) or (np.isfinite(vol) and vol > 0))
 
 
 def _is_locked_limit_up(row: pd.Series | None, limit_ratio: float) -> bool:
@@ -720,6 +857,27 @@ def _write_csv(path: Path, df: pd.DataFrame) -> None:
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+def _classify_executable_pool_halt_reason(risk_stats: dict[str, object]) -> str:
+    reasons: list[str] = []
+    if int(_safe_float(risk_stats.get("entry_not_tradable_hit", 0), 0)) > 0:
+        reasons.append("entry_not_tradable")
+    if int(_safe_float(risk_stats.get("adv_limits_hit", 0), 0)) > 0:
+        reasons.append("adv_capacity")
+    if int(_safe_float(risk_stats.get("style_limits_hit", 0), 0)) > 0:
+        reasons.append("style_exposure")
+    if int(_safe_float(risk_stats.get("industry_limits_hit", 0), 0)) > 0:
+        reasons.append("industry_weight")
+    if int(_safe_float(risk_stats.get("post_trade_industry_limits_hit", 0), 0)) > 0:
+        reasons.append("post_trade_industry")
+    if int(_safe_float(risk_stats.get("unknown_industry_limits_hit", 0), 0)) > 0:
+        reasons.append("unknown_industry")
+    if int(_safe_float(risk_stats.get("missing_industry_count", 0), 0)) > 0:
+        reasons.append("missing_industry")
+    if not reasons:
+        reasons.append("risk_gate_empty")
+    return "pretrade_empty:" + "+".join(reasons)
+
+
 def _attach_order_lifecycle(orders_df: pd.DataFrame) -> pd.DataFrame:
     if orders_df is None or orders_df.empty:
         return orders_df.copy() if orders_df is not None else pd.DataFrame()
@@ -764,11 +922,10 @@ def _build_p2_manifest(
     recommendation_file: Path | None,
     broker_name: str,
     live_mode: str,
+    market_data_lineage: dict[str, object],
 ) -> Path:
     security_cfg = load_security_config()
     tracked_files: dict[str, str | Path] = {
-        "daily_data": PARQUET_FILE,
-        "stock_meta": DATA_DIR / "stock_info.csv",
         "profile_config": PROFILE_FILE,
         "signal_file": signal_file,
         "state_file": state_file,
@@ -782,6 +939,7 @@ def _build_p2_manifest(
             "broker": str(broker_name),
             "live_mode": str(live_mode),
             "state_file": str(state_file),
+            "market_data": dict(market_data_lineage),
         },
         tracked_files=tracked_files,
         config_fingerprint=build_config_fingerprint(security_cfg),
@@ -918,6 +1076,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="风格门禁：短窗回看（Momentum/Vol）",
     )
     p.add_argument(
+        "--risk-style-exposure-basis",
+        choices=["invested_weighted", "nav_weighted"],
+        default=os.environ.get("MFTS_RISK_STYLE_EXPOSURE_BASIS", str(DEFAULTS.get("risk_style_exposure_basis", "invested_weighted"))),
+        help="风格门禁暴露口径：invested_weighted=持仓内平均暴露；nav_weighted=按 NAV 权重累计暴露",
+    )
+    p.add_argument(
         "--risk-style-lb-beta",
         type=int,
         default=int(os.environ.get("MFTS_RISK_STYLE_LB_BETA", str(int(DEFAULTS.get("risk_style_lb_beta", 60))))),
@@ -970,31 +1134,6 @@ def main() -> int:
             f"use_regime_position={rec_info['use_regime_position']}"
         )
 
-    if not bool(args.disable_industry_coverage_gate):
-        metadata_health = load_metadata_health(DATA_DIR)
-        metadata_gate = evaluate_metadata_guard(
-            metadata_health,
-            min_coverage_pct=float(args.min_industry_coverage_pct),
-            max_age_days=float(args.max_metadata_staleness_days),
-        )
-        if not bool(metadata_gate.get("passed", False)):
-            _log(
-                "⛔ 元数据门禁未通过: "
-                f"reason={metadata_gate.get('reason', '')} "
-                f"| coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
-                f"| min={float(metadata_gate.get('min_coverage_pct', 0.0)):.2f}% "
-                f"| age_days={float(metadata_gate.get('age_days', 0.0)):.2f} "
-                f"| max_age_days={float(metadata_gate.get('max_age_days', 0.0)):.2f} "
-                f"| file={metadata_gate.get('file', '')}"
-            )
-            return 1
-        _log(
-            "✅ 元数据门禁通过: "
-            f"coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
-            f"| age_days={float(metadata_gate.get('age_days', 0.0)):.2f} "
-            f"| file={metadata_gate.get('file', '')}"
-        )
-
     signal_file = _resolve_signal_file(args.signal_file, args.date)
     if signal_file is None:
         _log("未找到 daily 推荐文件，跳过 P2 OMS。")
@@ -1002,18 +1141,47 @@ def main() -> int:
 
     signal_date = _extract_signal_date(signal_file)
     _log(f"读取推荐文件: {signal_file} (signal_date={signal_date.date()})")
+    if not bool(args.disable_industry_coverage_gate):
+        metadata_health = load_ods_metadata_health(signal_date)
+        metadata_gate = evaluate_metadata_guard(
+            metadata_health,
+            min_coverage_pct=float(args.min_industry_coverage_pct),
+            max_age_days=float(args.max_metadata_staleness_days),
+        )
+        if not bool(metadata_gate.get("passed", False)):
+            _log(
+                "⛔ ODS 元数据门禁未通过: "
+                f"reason={metadata_gate.get('reason', '')} "
+                f"| coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
+                f"| file={metadata_gate.get('file', '')}"
+            )
+            return 1
+        _log(
+            "✅ ODS 元数据门禁通过: "
+            f"coverage={float(metadata_gate.get('coverage_pct', 0.0)):.2f}% "
+            f"| file={metadata_gate.get('file', '')}"
+        )
     candidate_pool_n = _resolve_candidate_pool_n(effective_top_n, DEFAULTS)
-    signal_df = _load_signal_df(
+    signal_df, signal_stats = _load_signal_df_with_stats(
         signal_file,
         top_n=candidate_pool_n,
         include_bj9=bool(args.include_bj9),
         exclude_st=bool(args.exclude_st),
     )
-    if signal_df.empty:
-        _log("推荐文件为空，跳过 P2 OMS。")
-        return 1 if args.strict else 0
+    external_target_budget = _external_target_weight_budget(signal_df)
+    empty_signal_state = str(signal_stats.get("empty_signal_reason", "") or "").strip()
+    empty_signal = bool(int(_safe_float(signal_stats.get("empty_signal", 0), 0)))
+    if empty_signal:
+        _log(
+            "推荐文件无可用候选，进入 no-signal 执行状态: "
+            f"state={empty_signal_state}, raw_rows={int(signal_stats.get('raw_rows', 0))}, "
+            f"valid_codes={int(signal_stats.get('valid_code_rows', 0))}, "
+            f"filtered_bj9={int(signal_stats.get('filtered_bj9_rows', 0))}, "
+            f"filtered_st={int(signal_stats.get('filtered_st_rows', 0))}; "
+            "no new entries, unwind existing positions if tradable."
+        )
 
-    bars = _load_bars()
+    bars = _load_bars(signal_date, signal_date, include_bj9=bool(args.include_bj9))
     trading_days = sorted(bars["trade_date"].dropna().unique())
     trade_date = _get_next_trade_day(trading_days, signal_date)
     if trade_date is None:
@@ -1028,12 +1196,23 @@ def main() -> int:
     total_target = float(args.default_total_pos)
     if args.target_total_pos is not None:
         total_target = float(args.target_total_pos)
+    elif bool(external_target_budget.get("has_external_target_weight", False)):
+        # Profile-isolated daily files may already contain capacity/holiday-capped
+        # target weights. P2 reserve re-optimization must stay inside that
+        # upstream budget rather than inflate back to the profile fallback.
+        total_target = float(external_target_budget.get("target_weight_sum", total_target))
     elif use_signal_position and "建议仓位" in signal_df.columns and not signal_df.empty:
         total_target = _parse_percent_text(signal_df["建议仓位"].iloc[0], total_target)
+    if empty_signal:
+        total_target = 0.0
 
     max_single = float(effective_max_single)
     if "单票上限" in signal_df.columns and not signal_df.empty:
         max_single = min(max_single, _parse_percent_text(signal_df["单票上限"].iloc[0], max_single))
+    if bool(external_target_budget.get("has_external_target_weight", False)):
+        external_single = float(external_target_budget.get("target_weight_max", 0.0))
+        if external_single > 1e-12:
+            max_single = min(max_single, external_single)
 
     total_target = min(max(total_target, 0.0), 1.0)
     max_single = min(max(max_single, 0.0), 1.0)
@@ -1049,13 +1228,14 @@ def main() -> int:
         max_style_beta_exposure_abs=max(0.0, float(args.risk_max_style_beta_exposure_abs)),
         max_style_momentum_exposure_abs=max(0.0, float(args.risk_max_style_momentum_exposure_abs)),
         max_style_vol_exposure_abs=max(0.0, float(args.risk_max_style_vol_exposure_abs)),
+        style_exposure_basis=str(args.risk_style_exposure_basis),
         style_lb_short=max(5, int(args.risk_style_lb_short)),
         style_lb_beta=max(10, int(args.risk_style_lb_beta)),
         max_names=int(effective_top_n),
         block_entry_not_tradable=True,
         blacklist_codes=_load_blacklist(args.risk_blacklist_file),
     )
-    industry_map = load_industry_map(DATA_DIR)
+    industry_map = load_industry_map(asof_date=signal_date)
     signal_df = _enrich_signal_amount_ma20(signal_df, bars_idx, signal_date, trade_date=trade_date)
     pretrade_state = _load_state(
         Path(args.state_file),
@@ -1102,6 +1282,11 @@ def main() -> int:
             risk_block_frames.append(pre_block_df)
         if pre_kept_df.empty:
             risk_stats = dict(pre_stats)
+            risk_stats["pre_optimizer_blocked_count"] = int(pre_stats.get("blocked_count", 0))
+            risk_stats["post_optimizer_blocked_count"] = 0
+            risk_stats["reserve_rounds_used"] = int(round_idx + 1)
+            risk_stats["reserve_candidate_pool_n"] = int(len(pretrade_input))
+            risk_stats["reserve_enabled"] = int(bool(DEFAULTS.get("reserve_pool_enabled", False)))
             gated_signal_df = pre_kept_df
             break
 
@@ -1170,11 +1355,28 @@ def main() -> int:
         f"entry_not_tradable_hit={int(risk_stats.get('entry_not_tradable_hit', 0))}, "
         f"style_hit={int(risk_stats.get('style_limits_hit', 0))}"
     )
-    if gated_signal_df.empty:
-        _log("风控硬门禁后无可交易标的，终止执行。")
+    executable_pool_halt = bool(gated_signal_df.empty)
+    executable_pool_halt_reason = ""
+    broker_target_total_pos = float(total_target)
+    execution_state = str(empty_signal_state or "normal")
+    if empty_signal:
+        executable_pool_halt = False
+        executable_pool_halt_reason = ""
+        broker_target_total_pos = 0.0
+        gated_signal_df = pretrade_input.head(0).copy()
+    elif executable_pool_halt:
+        executable_pool_halt_reason = _classify_executable_pool_halt_reason(risk_stats)
+        broker_target_total_pos = 0.0
+        gated_signal_df = pretrade_input.head(0).copy()
+        execution_state = "executable_pool_halt"
+        _log(
+            "风控硬门禁后无可交易标的，进入 executable_pool_halt: "
+            f"reason={executable_pool_halt_reason}; no new entries, unwind existing positions if tradable."
+        )
         if not risk_block_df.empty:
             _log(f"被拦截标的数: {len(risk_block_df)}")
-        return 1 if args.strict else 0
+    else:
+        execution_state = "normal"
 
     broker_name = str(args.broker or "paper").strip().lower()
     channel = _sanitize_channel(args.channel, fallback=broker_name)
@@ -1204,6 +1406,7 @@ def main() -> int:
         recommendation_file=recommendation_file,
         broker_name=broker_name,
         live_mode=str(args.live_mode),
+        market_data_lineage=dict(bars.attrs.get("market_data_lineage", {})),
     )
 
     try:
@@ -1214,7 +1417,7 @@ def main() -> int:
             bars_idx=bars_idx,
             run_id=run_id,
             top_n=effective_top_n,
-            target_total_pos=total_target,
+            target_total_pos=broker_target_total_pos,
             max_single_pos=max_single,
             reset_state=bool(args.reset_state),
             dry_run=bool(args.dry_run),
@@ -1263,6 +1466,49 @@ def main() -> int:
     ledger_row["dry_run"] = int(bool(args.dry_run))
     ledger_row["broker"] = broker_name
     ledger_row["channel"] = channel
+    entry_not_tradable_orders = int(entry_block.sum()) if len(entry_block) else 0
+    exit_not_tradable_orders = int(exit_block.sum()) if len(exit_block) else 0
+    ledger_row["execution_state"] = str(execution_state)
+    ledger_row["empty_signal"] = int(empty_signal)
+    ledger_row["empty_signal_reason"] = str(empty_signal_state if empty_signal else "")
+    ledger_row["empty_signal_raw_rows"] = int(signal_stats.get("raw_rows", 0))
+    ledger_row["empty_signal_valid_code_rows"] = int(signal_stats.get("valid_code_rows", 0))
+    ledger_row["empty_signal_post_filter_rows"] = int(signal_stats.get("post_filter_rows", 0))
+    ledger_row["empty_signal_filtered_bj9_rows"] = int(signal_stats.get("filtered_bj9_rows", 0))
+    ledger_row["empty_signal_filtered_st_rows"] = int(signal_stats.get("filtered_st_rows", 0))
+    ledger_row["executable_pool_halt"] = int(executable_pool_halt)
+    ledger_row["executable_pool_halt_reason"] = executable_pool_halt_reason
+    ledger_row["executable_pool_input_count"] = int(risk_stats.get("input_count", 0))
+    ledger_row["executable_pool_kept_count"] = int(risk_stats.get("kept_count", 0))
+    ledger_row["executable_pool_blocked_count"] = int(risk_stats.get("blocked_count", 0))
+    ledger_row["holiday_gap_guard"] = int(_signal_float_stat(signal_df, "holiday_gap_guard", 0.0, agg="max") > 0)
+    ledger_row["holiday_gap_reason"] = _signal_text_stat(signal_df, "holiday_gap_reason", "")
+    ledger_row["holiday_gap_signal_trade_gap_days"] = int(
+        _signal_float_stat(signal_df, "holiday_gap_signal_trade_gap_days", 0.0, agg="max")
+    )
+    ledger_row["holiday_gap_post_trade_gap_days"] = int(
+        _signal_float_stat(signal_df, "holiday_gap_post_trade_gap_days", 0.0, agg="max")
+    )
+    ledger_row["holiday_gap_target_scale"] = float(
+        _signal_float_stat(signal_df, "holiday_gap_target_scale", 1.0, agg="min")
+    )
+    ledger_row["holiday_gap_total_position_cap"] = float(
+        _signal_float_stat(signal_df, "holiday_gap_total_position_cap", 0.0, agg="max")
+    )
+    ledger_row["holiday_gap_single_pos_cap"] = float(
+        _signal_float_stat(signal_df, "holiday_gap_single_pos_cap", 0.0, agg="max")
+    )
+    ledger_row["holiday_gap_reason_override_applied"] = int(
+        _signal_float_stat(signal_df, "holiday_gap_reason_override_applied", 0.0, agg="max") > 0
+    )
+    ledger_row["upstream_target_weight_present"] = int(bool(external_target_budget.get("has_external_target_weight", False)))
+    ledger_row["upstream_target_weight_sum"] = float(external_target_budget.get("target_weight_sum", 0.0))
+    ledger_row["upstream_target_weight_positive_count"] = int(
+        external_target_budget.get("target_weight_positive_count", 0)
+    )
+    ledger_row["upstream_target_weight_max"] = float(external_target_budget.get("target_weight_max", 0.0))
+    ledger_row["upstream_target_weight_checksum"] = str(external_target_budget.get("target_weight_checksum", ""))
+    ledger_row["broker_target_total_pos"] = float(broker_target_total_pos)
     ledger_row["risk_input_count"] = int(risk_stats.get("input_count", 0))
     ledger_row["risk_kept_count"] = int(risk_stats.get("kept_count", 0))
     ledger_row["risk_blocked_count"] = int(risk_stats.get("blocked_count", 0))
@@ -1286,8 +1532,10 @@ def main() -> int:
     ledger_row["used_recommendation"] = int(bool(rec_info))
     ledger_row["recommend_rank"] = int(rec_info.get("recommend_rank", 0)) if rec_info else 0
     ledger_row["recommend_risk_tier"] = str(rec_info.get("risk_tier", "")) if rec_info else ""
-    ledger_row["entry_not_tradable_orders"] = int(entry_block.sum()) if len(entry_block) else 0
-    ledger_row["exit_not_tradable_orders"] = int(exit_block.sum()) if len(exit_block) else 0
+    ledger_row["entry_not_tradable_orders"] = entry_not_tradable_orders
+    ledger_row["exit_not_tradable_orders"] = exit_not_tradable_orders
+    ledger_row["broker_entry_not_tradable_orders"] = entry_not_tradable_orders
+    ledger_row["broker_exit_not_tradable_orders"] = exit_not_tradable_orders
     ledger_row["blocked_target_weight"] = float(weights.loc[blocked_or_rejected].sum()) if len(weights) else 0.0
     ledger_row["entry_not_tradable_target_weight"] = float(weights.loc[entry_block].sum()) if len(weights) else 0.0
     ledger_row["exit_not_tradable_target_weight"] = float(weights.loc[exit_block].sum()) if len(weights) else 0.0
@@ -1315,6 +1563,10 @@ def main() -> int:
         "signal_date": signal_date.strftime("%Y-%m-%d"),
         "trade_date": pd.to_datetime(trade_date).strftime("%Y-%m-%d"),
         "target_total_pos": float(total_target),
+        "broker_target_total_pos": float(broker_target_total_pos),
+        "execution_state": str(ledger_row["execution_state"]),
+        "empty_signal_reason": str(ledger_row.get("empty_signal_reason", "")),
+        "executable_pool_halt_reason": executable_pool_halt_reason,
         "max_single_pos": float(max_single),
         "top_n": int(effective_top_n),
         "filled_orders": int(ledger_row["filled_orders"]),

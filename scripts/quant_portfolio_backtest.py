@@ -38,16 +38,17 @@ from core.platform import (
     load_security_config,
     write_run_manifest,
 )
+from core.data.market_data_gateway import AShareMarketDataGateway, load_execution_bars
+from core.risk.pretrade import load_industry_map as load_ods_industry_map
 from utils.code_utils import normalize_ts_code, normalize_ts_code_series, limit_ratio_for_stock
-from utils.metadata_guard import evaluate_metadata_guard, load_metadata_health
+from utils.market_data_units import normalize_amount_volume_units
+from utils.metadata_guard import evaluate_metadata_guard, load_ods_metadata_health
 from utils.output_paths import ensure_output_dirs, write_dual_csv
 from utils.execution_overlay import add_execution_overlay_scores
 from utils.signal_refactor import add_feature_refactor_columns
 from utils.signal_quality import add_signal_quality_columns
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-PARQUET_FILE = os.path.join(DATA_DIR, "daily_all_5y.parquet")
 PROFILE_FILE = os.path.join(BASE_DIR, "config", "quant_live_profiles.json")
 UNKNOWN_INDUSTRY_LABEL = "未知"
 
@@ -330,32 +331,9 @@ def _compute_risk_switch_factor(cfg: BacktestConfig, trades: list[dict[str, obje
     return float(1.0 - stress * (1.0 - floor))
 
 
-def _load_industry_map() -> dict[str, str]:
-    candidates = [
-        os.path.join(DATA_DIR, "stock_info.csv"),
-        os.path.join(DATA_DIR, "stock_metadata.csv"),
-        os.path.join(DATA_DIR, "stock_basic.csv"),
-    ]
-    for fp in candidates:
-        if not os.path.exists(fp):
-            continue
-        try:
-            df = pd.read_csv(fp, dtype={"ts_code": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if not code_col or not ind_col:
-            continue
-        work = df[[code_col, ind_col]].copy()
-        work["code"] = work[code_col].apply(_norm_code)
-        work = work[work["code"] != ""].copy()
-        work["industry"] = work[ind_col].astype(str).fillna("").str.strip()
-        work["industry"] = work["industry"].replace({"nan": "", "None": ""})
-        return dict(zip(work["code"], work["industry"]))
-    return {}
+def _load_industry_map(asof_date: object | None = None) -> dict[str, str]:
+    """Load the backtest industry map from ODS metadata as of each evidence window."""
+    return load_ods_industry_map(asof_date=asof_date)
 
 
 def _parse_percent_text(text: str | float | int | None, fallback: float) -> float:
@@ -413,7 +391,13 @@ def _load_daily_recommendations(output_dir: str, exclude_bj9: bool = True) -> di
     return rec_map
 
 
-def _load_market_open_prices(parquet_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _load_market_open_prices(
+    start: object,
+    end: object,
+    *,
+    holding_days: int,
+    include_bj9: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     加载回测需要的市场 bar，并构建 MultiIndex 快速查询视图。
 
@@ -421,34 +405,15 @@ def _load_market_open_prices(parquet_file: str) -> tuple[pd.DataFrame, pd.DataFr
     - market_df: 明细 DataFrame（供相关性/基准使用）
     - bars_idx: 以 (trade_date, code) 为索引的 DataFrame（供执行可达性判断）
     """
-    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"]
-    df = pd.read_parquet(parquet_file, columns=cols)
-    df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dt.normalize()
-    df["code"] = normalize_ts_code_series(df["ts_code"])
-    for col in ["open", "high", "low", "close", "vol", "amount"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["trade_date", "code"])
-    df = df[df["code"] != ""].copy()
-    df = df.sort_values(["code", "trade_date"]).reset_index(drop=True)
-    df["prev_close"] = df.groupby("code", observed=True)["close"].shift(1)
-    df["amount_ma20"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(20, min_periods=5).mean())
-        .fillna(0.0)
+    market, bars_idx, lineage = load_execution_bars(
+        start,
+        end,
+        lookback_sessions=60,
+        forward_sessions=max(1, int(holding_days)),
+        include_bj9=bool(include_bj9),
     )
-    df["amount_min5"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(5, min_periods=1).min())
-        .fillna(0.0)
-    )
-    df["amount_min10"] = (
-        df.groupby("code", observed=True)["amount"]
-        .transform(lambda s: s.rolling(10, min_periods=3).min())
-        .fillna(df["amount_min5"])
-    )
-
-    bars_idx = df.set_index(["trade_date", "code"]).sort_index()
-    return df, bars_idx
+    market.attrs["market_data_lineage"] = lineage
+    return market, bars_idx
 
 
 def _safe_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
@@ -487,7 +452,9 @@ def _is_suspended_bar(row: pd.Series | None) -> bool:
     op = float(row.get("open", np.nan))
     vol = float(row.get("vol", np.nan))
     amt = float(row.get("amount", np.nan))
-    return (not np.isfinite(op)) or (op <= 0) or (not np.isfinite(vol)) or (vol <= 0) or (not np.isfinite(amt)) or (amt <= 0)
+    if (not np.isfinite(op)) or (op <= 0):
+        return True
+    return not ((np.isfinite(amt) and amt > 0) or (np.isfinite(vol) and vol > 0))
 
 
 def _is_locked_limit_up(row: pd.Series | None, limit_ratio: float) -> bool:
@@ -569,8 +536,6 @@ def _resolve_benchmark_file(explicit_file: str | None) -> str | None:
         candidates.append(explicit_file)
     candidates.extend(
         [
-            os.path.join(DATA_DIR, "benchmarks", "hs300_daily.csv"),
-            os.path.join(DATA_DIR, "hs300_daily.csv"),
             os.path.join(OUTPUT_DIR, "backtest", "hs300_daily.csv"),
         ]
     )
@@ -1044,8 +1009,16 @@ def backtest_portfolio(cfg: BacktestConfig) -> tuple[pd.DataFrame, dict[str, flo
     if not rec_map:
         raise RuntimeError("未找到 daily_YYYYMMDD.csv 推荐文件，请先生成历史 ML 推荐。")
 
-    market_df, bars_idx = _load_market_open_prices(PARQUET_FILE)
-    industry_map = _load_industry_map()
+    recommendation_dates = sorted(rec_map)
+    market_start = pd.to_datetime(cfg.start).normalize() if cfg.start else recommendation_dates[0]
+    market_end = pd.to_datetime(cfg.end).normalize() if cfg.end else recommendation_dates[-1]
+    market_df, bars_idx = _load_market_open_prices(
+        market_start,
+        market_end,
+        holding_days=cfg.holding_days,
+        include_bj9=not cfg.exclude_bj9,
+    )
+    industry_map = _load_industry_map(asof_date=market_end)
     bench_level_map, bench_used = _load_benchmark_levels(cfg, market_df)
     amount_lookup = {
         (d, c): {
@@ -1594,8 +1567,6 @@ def _save_outputs(trades_df: pd.DataFrame, metrics: dict[str, float], cfg: Backt
 def _build_backtest_manifest(cfg: BacktestConfig, argv: list[str]) -> Path:
     security_cfg = load_security_config()
     tracked_files: dict[str, str | Path] = {
-        "daily_data": PARQUET_FILE,
-        "stock_meta": Path(DATA_DIR) / "stock_info.csv",
         "profile_config": PROFILE_FILE,
     }
     if cfg.benchmark_file:
@@ -1611,6 +1582,12 @@ def _build_backtest_manifest(cfg: BacktestConfig, argv: list[str]) -> Path:
             "engine_mode": str(cfg.engine_mode),
             "benchmark_mode": str(cfg.benchmark_mode),
             "use_regime_position": bool(cfg.use_regime_position),
+            "market_data": {
+                "data_source": "ashare_ods",
+                "data_root": str(AShareMarketDataGateway().data_root),
+                "snapshot_policy": "latest_snapshot_per_trade_date",
+                "price_mode": "unadjusted",
+            },
         },
         tracked_files=tracked_files,
         config_fingerprint=build_config_fingerprint(security_cfg),
@@ -1751,7 +1728,8 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     if not bool(args.disable_industry_coverage_gate):
-        metadata_health = load_metadata_health(DATA_DIR)
+        asof_date = args.end or AShareMarketDataGateway().available_trade_dates()[-1]
+        metadata_health = load_ods_metadata_health(asof_date)
         metadata_gate = evaluate_metadata_guard(
             metadata_health,
             min_coverage_pct=float(args.min_industry_coverage_pct),

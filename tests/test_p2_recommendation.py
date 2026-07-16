@@ -186,8 +186,8 @@ def test_assign_profile_target_weights_uses_configured_capacity_column():
 def test_p2_main_blocks_when_metadata_gate_fails(monkeypatch):
     monkeypatch.setattr(
         p2,
-        "load_metadata_health",
-        lambda _data_dir: {"ok": True, "coverage_pct": 10.0, "age_days": 0.2, "file": "mock.csv"},
+        "load_ods_metadata_health",
+        lambda _asof_date: {"ok": True, "coverage_pct": 10.0, "age_days": 0.2, "file": "mock.csv"},
     )
     monkeypatch.setattr(
         p2,

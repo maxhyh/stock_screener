@@ -1,14 +1,14 @@
 # Nightly Memory Review Draft
 
-Generated at `2026-04-27 07:50:01` by `scripts/quant_memory_evolve.py`.
+Generated at `2026-07-16 20:46:45` by `scripts/quant_memory_evolve.py`.
 
 ## Summary
 
-- long_term_learning_entries: 11
+- long_term_learning_entries: 116
 - active_cards: 12
-- active_error_cards: 11
-- newly_promoted_active_hashes: d2d97b9c2cdaa5cf
-- input_signature: `3614c0cae960be23`
+- active_error_cards: 91
+- newly_promoted_active_hashes: e3019ff439273b18
+- input_signature: `437a0e4c49972fed`
 
 ## Review Questions
 
@@ -19,18 +19,18 @@ Generated at `2026-04-27 07:50:01` by `scripts/quant_memory_evolve.py`.
 
 ## Active Cards For Review
 
+- `ee42163aac326712` P2 reserve re-optimization can silently overrun upstream target weights (errors.md)
+- `804a2848958e0a57` Sell-trap clusters can be hidden by aggregate window metrics (errors.md)
 - `3622f3b98422ad92` P2 replay can become invalid if a script-level rebalance path recomputes target weights (errors.md)
-- `b7e38c917b54913a` Blocked sells can create false buying power if not stateful (errors.md)
-- `a8edccf342ce5e8d` Shared daily fallback contaminates profile replay evidence (errors.md)
-- `d9112dec90546429` Promotion can pass strict gates over inconsistent target-weight evidence (errors.md)
-- `d2d97b9c2cdaa5cf` Capacity-safe reserves do not help when the executable pool collapses (errors.md)
-- `1f387fa177c59de7` Reserve pool can raise exposure while worsening realized losses (errors.md)
-- `bc9945e247e7990d` Low-invested candidates can look safer than they are (errors.md)
-- `e0d5e375adebd905` Next-day pretrade gates can leak execution outcomes into research selection (errors.md)
-- `1ecc8368d4830de8` Research strong, execution weak is often a capacity/portfolio issue, not just a signal issue (errors.md)
-- `2bb4cab621e09813` Expanding candidate count without primary-topN semantics creates micro-position drift (errors.md)
-- `9d75157e798d069f` Industry ranking penalties alone do not guarantee portfolio-level diversification (errors.md)
-- `58967edab4e6aa66` v8 improves invested weight but fails execution-alpha validation (learnings.md)
+- `e3019ff439273b18` Execution limits must consume official pre-close and limit prices (errors.md)
+- `4b41aa7a0fa41f82` P2 profile cap bugs make old reserve/exit-trap artifacts legacy evidence (errors.md)
+- `b1f22b18a20137c4` Invested-average style gates can manufacture low-risk cash exposure (errors.md)
+- `9427c1f1cf410cd5` Same row count can hide mismatched P2 evidence calendars (errors.md)
+- `e4c3c4cd6fdb5c30` Score-alpha and coverage pass can still fail P2 execution smoke (errors.md)
+- `defc2d7f975d27f4` Score-alpha pass can hide profile daily coverage gaps (errors.md)
+- `750f1097d77c800a` Shared daily files can be stale/orphan artifacts when market bars are missing (errors.md)
+- `d58c1a9eb1723810` Target-score overrides can reduce losses by starving deployment (errors.md)
+- `7247b085026f5410` BJ-only shared daily files can masquerade as repeated P2 failures (errors.md)
 
 ## Suggested Commands
 

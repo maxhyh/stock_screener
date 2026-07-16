@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from core.data import AShareMarketDataGateway
+
 
 def df_to_json_safe(df: pd.DataFrame) -> list[dict[str, Any]]:
     """将 DataFrame 转换为 JSON 兼容 records，处理 NaN/Inf。"""
@@ -167,29 +169,22 @@ def load_scan_results(
         return [], actual_date
 
 
-def get_verification_data(codes: list[str], scan_date: datetime, parquet_file: str, logger=None) -> dict[str, Any]:
-    """获取 T+1/T+5 验证数据。"""
-    if not os.path.exists(parquet_file):
-        return {}
-
+def get_verification_data(codes: list[str], scan_date: datetime, data_root: str | None = None, logger=None) -> dict[str, Any]:
+    """获取 T+1/T+5 验证数据，仅读取共享 ODS 的目标交易日。"""
     try:
-        df = pd.read_parquet(parquet_file)
-        df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str))
-        df["ts_code"] = df["ts_code"].astype(str).str.zfill(6)
-        if len(df) > 0 and "." in df["ts_code"].iloc[0]:
-            df["ts_code"] = df["ts_code"].apply(lambda x: x.split(".")[0])
-
-        trading_dates = sorted(df["trade_date"].unique())
-
+        gateway = AShareMarketDataGateway(data_root or None)
+        trading_dates = [pd.Timestamp(date).normalize() for date in gateway.available_trade_dates()]
+        if not trading_dates:
+            return {}
         scan_ts = pd.Timestamp(scan_date)
         if scan_ts.tz is not None:
             scan_ts = scan_ts.tz_localize(None)
-
+        scan_ts = scan_ts.normalize()
         if scan_ts not in trading_dates:
             prior_dates = [d for d in trading_dates if d <= scan_ts]
             if not prior_dates:
                 if logger:
-                    logger.warning(f"No trading date found on or before {scan_ts}")
+                    logger.warning(f"No ODS trading date found on or before {scan_ts}")
                 return {}
             scan_ts = prior_dates[-1]
 
@@ -200,18 +195,26 @@ def get_verification_data(codes: list[str], scan_date: datetime, parquet_file: s
             target_idx = curr_idx + days
             if target_idx >= len(trading_dates):
                 continue
-
             target_day = trading_dates[target_idx]
-            target_df = df[df["trade_date"] == target_day]
+            target_df = gateway.load_bars(target_day, target_day)
+            if target_df.empty:
+                continue
+            target_df["trade_date"] = pd.to_datetime(target_df["trade_date"], errors="coerce").dt.normalize()
+            target_df["code_key"] = target_df["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).fillna("")
+            target_df["pct_chg"] = pd.to_numeric(target_df.get("pct_chg"), errors="coerce")
+            if target_df["pct_chg"].isna().all() and {"close", "pre_close"}.issubset(target_df.columns):
+                close = pd.to_numeric(target_df["close"], errors="coerce")
+                pre_close = pd.to_numeric(target_df["pre_close"], errors="coerce")
+                target_df["pct_chg"] = (close / pre_close.replace(0.0, np.nan) - 1.0) * 100.0
             for code in codes:
-                normalized_code = str(code).zfill(6)
-                if "." in normalized_code:
-                    normalized_code = normalized_code.split(".")[0]
-                row = target_df[target_df["ts_code"] == normalized_code]
+                normalized_code = str(code).split(".")[0].zfill(6)
+                row = target_df[target_df["code_key"] == normalized_code]
                 if row.empty:
                     continue
 
-                pct = row["pct_chg"].values[0]
+                pct = pd.to_numeric(row["pct_chg"].iloc[0], errors="coerce")
+                if not np.isfinite(pct):
+                    continue
                 if code not in verification:
                     verification[code] = {}
                 verification[code][key] = {
@@ -277,13 +280,12 @@ def calculate_statistics(results: list[dict[str, Any]], verification: dict[str, 
     return stats
 
 
-def get_stock_names(codes: list[str], meta_file: str) -> dict[str, str]:
-    """从 stock_info.csv 获取股票名称。"""
-    if not os.path.exists(meta_file):
-        return {code: code for code in codes}
-
+def get_stock_names(codes: list[str], asof_date: object | None = None, data_root: str | None = None) -> dict[str, str]:
+    """从共享 ODS instrument master 获取股票名称。"""
     try:
-        df = pd.read_csv(meta_file)
+        gateway = AShareMarketDataGateway(data_root or None)
+        asof = asof_date or gateway.available_trade_dates()[-1]
+        df = gateway.load_stock_info(asof)
         if "ts_code" not in df.columns or "name" not in df.columns:
             return {code: code for code in codes}
 
@@ -304,7 +306,7 @@ def get_stock_names(codes: list[str], meta_file: str) -> dict[str, str]:
         return {code: code for code in codes}
 
 
-def load_ml_results(output_dir: str, meta_file: str, date_str: str | None = None, logger=None) -> list[dict[str, Any]]:
+def load_ml_results(output_dir: str, data_root: str | None = None, date_str: str | None = None, logger=None) -> list[dict[str, Any]]:
     """加载 ML 预测结果并映射到前端展示结构。"""
     search_dirs = [os.path.join(output_dir, "daily"), output_dir, os.path.join(output_dir, "ml_predictions")]
     file_path = None
@@ -365,7 +367,7 @@ def load_ml_results(output_dir: str, meta_file: str, date_str: str | None = None
             df = df.head(50)
 
         codes = df["ts_code"].tolist()
-        name_map = get_stock_names(codes, meta_file)
+        name_map = get_stock_names(codes, asof_date=date_str, data_root=data_root)
 
         results: list[dict[str, Any]] = []
         for idx, row in df.iterrows():

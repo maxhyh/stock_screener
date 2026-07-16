@@ -29,6 +29,8 @@ def _sample_payload() -> dict[str, object]:
             "candidate_p2_executed_days_total": 261,
             "min_p2_executed_days": 20,
             "candidate_p2_gate_passed": True,
+            "candidate_promotion_hard_gate_passed": False,
+            "candidate_execution_parity_passed": False,
         },
         "artifacts": {
             "review_csv": "/tmp/review.csv",

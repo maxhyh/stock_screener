@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from core.data.market_data_gateway import AShareMarketDataGateway
 from utils.code_utils import limit_ratio_for_stock, normalize_ts_code, normalize_ts_code_series
 from utils.portfolio_weights import build_score_weights
 
@@ -25,6 +26,7 @@ class PreTradeRiskConfig:
     max_style_beta_exposure_abs: float = 0.0
     max_style_momentum_exposure_abs: float = 0.0
     max_style_vol_exposure_abs: float = 0.0
+    style_exposure_basis: str = "invested_weighted"
     style_lb_short: int = 20
     style_lb_beta: int = 60
     max_names: int = 0
@@ -238,28 +240,34 @@ def _get_bar_row(bars_idx: pd.DataFrame, trade_date: pd.Timestamp, code: str) ->
     return row
 
 
-def load_industry_map(data_dir: str | Path) -> dict[str, str]:
-    d = Path(data_dir)
-    candidates = [d / "stock_info.csv", d / "stock_metadata.csv", d / "stock_basic.csv"]
-    for fp in candidates:
-        if not fp.exists():
-            continue
-        try:
-            df = pd.read_csv(fp, dtype={"ts_code": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
-        ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
-        if not code_col or not ind_col:
-            continue
-        work = df[[code_col, ind_col]].copy()
-        work["code"] = normalize_ts_code_series(work[code_col])
-        work = work[work["code"] != ""].copy()
-        work["industry"] = work[ind_col].astype(str).fillna("").str.strip().replace({"nan": "", "None": ""})
-        return dict(zip(work["code"], work["industry"]))
-    return {}
+def load_industry_map(
+    data_dir: str | Path | None = None,
+    *,
+    asof_date: object | None = None,
+) -> dict[str, str]:
+    """Read ODS instrument industries as of the signal date.
+
+    ``data_dir`` is retained temporarily for call compatibility but is not read.
+    """
+    del data_dir
+    gateway = AShareMarketDataGateway()
+    if asof_date is None:
+        sessions = gateway.available_trade_dates()
+        if not sessions:
+            return {}
+        asof_date = sessions[-1]
+    df = gateway.load_stock_info(asof_date, include_bj9=True)
+    if df.empty:
+        return {}
+    code_col = "ts_code" if "ts_code" in df.columns else ("代码" if "代码" in df.columns else None)
+    ind_col = "industry" if "industry" in df.columns else ("行业" if "行业" in df.columns else None)
+    if not code_col or not ind_col:
+        return {}
+    work = df[[code_col, ind_col]].copy()
+    work["code"] = normalize_ts_code_series(work[code_col])
+    work = work[work["code"] != ""].copy()
+    work["industry"] = work[ind_col].astype(str).fillna("").str.strip().replace({"nan": "", "None": ""})
+    return dict(zip(work["code"], work["industry"]))
 
 
 def apply_pretrade_risk_gates(
@@ -338,6 +346,9 @@ def apply_pretrade_risk_gates(
         "vol": _clip_limit(cfg.max_style_vol_exposure_abs),
     }
     style_enabled = any(np.isfinite(v) for v in style_limits.values())
+    style_exposure_basis = str(getattr(cfg, "style_exposure_basis", "invested_weighted") or "invested_weighted").strip().lower()
+    if style_exposure_basis not in {"invested_weighted", "nav_weighted"}:
+        style_exposure_basis = "invested_weighted"
     style_map = (
         _compute_style_factor_zscores(
             bars_idx=bars_idx,
@@ -448,7 +459,8 @@ def apply_pretrade_risk_gates(
                     "vol": vol_z,
                 }
                 for fac, val in factor_vals.items():
-                    next_exp = (style_used_sum.get(fac, 0.0) + wt * val) / max(next_w, 1e-12)
+                    denom = 1.0 if style_exposure_basis == "nav_weighted" else max(next_w, 1e-12)
+                    next_exp = (style_used_sum.get(fac, 0.0) + wt * val) / denom
                     next_style_exp[fac] = float(next_exp)
                     lim = float(style_limits.get(fac, np.inf))
                     if np.isfinite(lim) and abs(float(next_exp)) > lim + 1e-9:
@@ -478,6 +490,7 @@ def apply_pretrade_risk_gates(
                         "style_beta_exposure_next": float(next_style_exp["beta"]),
                         "style_momentum_exposure_next": float(next_style_exp["momentum"]),
                         "style_vol_exposure_next": float(next_style_exp["vol"]),
+                        "style_exposure_basis": style_exposure_basis,
                     }
                 )
                 continue
@@ -537,6 +550,7 @@ def apply_pretrade_risk_gates(
         "style_beta_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_beta_exposure")).sum()) if not blocked_df.empty else 0,
         "style_momentum_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_momentum_exposure")).sum()) if not blocked_df.empty else 0,
         "style_vol_limits_hit": int((blocked_df["reasons"].astype(str).str.contains("style_vol_exposure")).sum()) if not blocked_df.empty else 0,
+        "style_exposure_basis": style_exposure_basis,
         "entry_not_tradable_hit": int((blocked_df["reasons"].astype(str).str.contains("entry_not_tradable")).sum()) if not blocked_df.empty else 0,
         "max_names": int(cfg.max_names),
     }

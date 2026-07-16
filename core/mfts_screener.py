@@ -12,6 +12,8 @@ import sys
 import warnings
 from pathlib import Path
 
+from core.data.market_data_gateway import AShareMarketDataGateway
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -28,10 +30,7 @@ try:
     from utils.output_paths import ensure_output_dirs, write_dual_csv
     
     # 使用配置
-    DATA_DIR = str(PathConfig.DATA_DIR)
     OUTPUT_DIR = str(PathConfig.OUTPUT_DIR)
-    PARQUET_FILE = str(PathConfig.PARQUET_FILE)
-    META_FILE = str(PathConfig.META_FILE)
     START_DATE_FILTER = MFTSConfig.START_DATE_FILTER
     PARAMS = MFTSConfig.to_dict()
     
@@ -43,12 +42,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("Config module not available, using defaults")
     
-    DATA_DIR = os.path.join(BASE_DIR, "data")
     OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-    PARQUET_FILE = os.path.join(DATA_DIR, "daily_all.parquet")
-    if os.path.exists(os.path.join(DATA_DIR, "daily_all_5y.parquet")):
-        PARQUET_FILE = os.path.join(DATA_DIR, "daily_all_5y.parquet")
-    META_FILE = os.path.join(DATA_DIR, "stock_info.csv")
     START_DATE_FILTER = '20240101'
     PARAMS = {
         'bias_len': 20,
@@ -76,38 +70,19 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "mfts_v6.1_scan_result.csv")
 
 
 def load_data():
-    """加载股票数据"""
-    if not os.path.exists(PARQUET_FILE):
-        logger.error(f"Data file not found at {PARQUET_FILE}")
+    """Load screener bars from the canonical read-only ODS gateway."""
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
+        logger.error("Shared ODS has no available daily-bar sessions")
         return None
-
-    logger.info(f"Loading data from {PARQUET_FILE}...")
-    df = None
-    
-    # 方法1: 尝试使用整数过滤（本地格式）
-    try:
-        start_date_int = int(START_DATE_FILTER)
-        df = pd.read_parquet(PARQUET_FILE, filters=[('trade_date', '>=', start_date_int)])
-        logger.debug(f"Loaded {len(df)} rows with int filter")
-    except Exception as e:
-        logger.debug(f"Int filter failed: {type(e).__name__}")
-    
-    # 方法2: 尝试使用字符串过滤（云端格式）
-    if df is None:
-        try:
-            df = pd.read_parquet(PARQUET_FILE, filters=[('trade_date', '>=', START_DATE_FILTER)])
-            logger.debug(f"Loaded {len(df)} rows with str filter")
-        except Exception as e:
-            logger.debug(f"Str filter failed: {type(e).__name__}")
-    
-    # 方法3: 加载全部数据后过滤（最慢但最可靠）
-    if df is None:
-        logger.warning("Filter failed, loading full data...")
-        df = pd.read_parquet(PARQUET_FILE)
-        try:
-            df = df[df['trade_date'].astype(str) >= START_DATE_FILTER]
-        except Exception:
-            pass  # 保留所有数据
+    start = max(str(START_DATE_FILTER), sessions[0])
+    end = sessions[-1]
+    logger.info("Loading ODS market data from %s to %s", start, end)
+    df = gateway.load_bars(start, end, include_bj9=False)
+    if df.empty:
+        logger.error("Shared ODS returned no market bars")
+        return None
 
     df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str))
     # [Fix] Convert category to string to avoid fillna(0) error
@@ -125,35 +100,31 @@ def load_data():
     return df
 
 
-def load_metadata():
-    """加载股票元数据"""
-    if not os.path.exists(META_FILE):
-        logger.warning(f"Metadata file not found: {META_FILE}")
-        return {}
-    try:
-        meta_df = pd.read_csv(META_FILE, dtype={'ts_code': str})
-        if meta_df.empty:
+def load_metadata(asof_date: object | None = None):
+    """Load ODS instrument metadata as of the signal date."""
+    gateway = AShareMarketDataGateway()
+    if asof_date is None:
+        sessions = gateway.available_trade_dates()
+        if not sessions:
             return {}
-        code_col = "ts_code" if "ts_code" in meta_df.columns else ("代码" if "代码" in meta_df.columns else None)
-        if code_col is None:
-            logger.warning("Metadata missing ts_code/代码 column")
-            return {}
-        name_col = "name" if "name" in meta_df.columns else ("名称" if "名称" in meta_df.columns else None)
-        ind_col = "industry" if "industry" in meta_df.columns else ("行业" if "行业" in meta_df.columns else None)
-
-        work = pd.DataFrame()
-        work["ts_code"] = normalize_ts_code_series(meta_df[code_col])
-        work["name"] = meta_df[name_col].astype(str).fillna("").str.strip() if name_col else ""
-        work["industry"] = meta_df[ind_col].astype(str).fillna("").str.strip() if ind_col else ""
-        work = work[work["ts_code"] != ""]
-        work = work.drop_duplicates(subset=["ts_code"], keep="last")
-        # Convert to recursive dict for fast lookup: code -> {'name': ..., 'industry': ...}
-        result = work.set_index('ts_code').to_dict('index')
-        logger.debug(f"Loaded metadata for {len(result)} stocks")
-        return result
-    except (pd.errors.EmptyDataError, pd.errors.ParserError, OSError) as e:
-        logger.error(f"Metadata load failed: {e}")
+        asof_date = sessions[-1]
+    meta_df = gateway.load_stock_info(asof_date, include_bj9=True)
+    if meta_df.empty:
         return {}
+    code_col = "ts_code" if "ts_code" in meta_df.columns else ("代码" if "代码" in meta_df.columns else None)
+    if code_col is None:
+        logger.warning("ODS instrument metadata missing ts_code/代码 column")
+        return {}
+    name_col = "name" if "name" in meta_df.columns else ("名称" if "名称" in meta_df.columns else None)
+    ind_col = "industry" if "industry" in meta_df.columns else ("行业" if "行业" in meta_df.columns else None)
+    work = pd.DataFrame()
+    work["ts_code"] = normalize_ts_code_series(meta_df[code_col])
+    work["name"] = meta_df[name_col].astype(str).fillna("").str.strip() if name_col else ""
+    work["industry"] = meta_df[ind_col].astype(str).fillna("").str.strip() if ind_col else ""
+    work = work[work["ts_code"] != ""].drop_duplicates(subset=["ts_code"], keep="last")
+    result = work.set_index("ts_code").to_dict("index")
+    logger.debug("Loaded ODS metadata for %d stocks as of %s", len(result), asof_date)
+    return result
 
 
 def get_limit_ratio(ts_code, name=''):

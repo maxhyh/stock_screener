@@ -26,10 +26,9 @@ sys.path.insert(0, BASE_DIR)
 
 from utils.code_utils import normalize_ts_code_series
 from utils.output_paths import ensure_output_dirs, list_dual
+from core.data.market_data_gateway import AShareMarketDataGateway
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-PARQUET_FILE = os.path.join(DATA_DIR, "daily_all_5y.parquet")
 
 
 def _load_historical_picks(output_dir: str, n_days: int = 60) -> pd.DataFrame:
@@ -58,9 +57,14 @@ def _load_historical_picks(output_dir: str, n_days: int = 60) -> pd.DataFrame:
     return pd.concat(all_picks, ignore_index=True)
 
 
-def _load_amount_data(parquet_file: str, lookback_days: int = 60) -> pd.DataFrame:
-    """加载成交额数据。"""
-    df = pd.read_parquet(parquet_file, columns=["ts_code", "trade_date", "amount"])
+def _load_amount_data(lookback_days: int = 60) -> pd.DataFrame:
+    """从共享只读 ODS 加载最近交易日成交额。"""
+    gateway = AShareMarketDataGateway()
+    sessions = gateway.available_trade_dates()
+    if not sessions:
+        raise RuntimeError("共享 ODS 没有容量评估所需的日线会话")
+    start = sessions[max(0, len(sessions) - max(int(lookback_days), 1))]
+    df = gateway.load_bars(start, sessions[-1], include_bj9=False)[["ts_code", "trade_date", "amount"]].copy()
     df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str))
     df["ts_code"] = normalize_ts_code_series(df["ts_code"])
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
@@ -182,7 +186,7 @@ def main():
     print(f"  推荐记录: {len(picks_df)} 条，涉及 {picks_df['代码'].nunique()} 只标的")
 
     print("加载成交额数据...")
-    amount_df = _load_amount_data(PARQUET_FILE, lookback_days=args.lookback_days)
+    amount_df = _load_amount_data(lookback_days=args.lookback_days)
 
     result = estimate_capacity(
         picks_df,

@@ -30,6 +30,8 @@ def _decision_payload(decision: str, expected_current: str, final_default: str) 
             "candidate_p2_executed_days_total": 30,
             "min_p2_executed_days": 20,
             "candidate_p2_gate_passed": True,
+            "candidate_promotion_hard_gate_passed": decision == "promote",
+            "candidate_execution_parity_passed": decision == "promote",
         },
         "artifacts": {
             "review_csv": "/tmp/review.csv",
